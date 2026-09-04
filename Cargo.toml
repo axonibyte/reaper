@@ -8,4 +8,5 @@ members = ["manifest", "core", "providers/proxmox", "providers/registry", "cli"]
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/calebpower/reaper"
+authors = ["Axonibyte Innovations, LLC"]
+repository = "https://bitbucket.org/axonibyte/reaper"

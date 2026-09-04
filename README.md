@@ -365,4 +365,4 @@ run could not, and that is the reason it exists.
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE). Copyright (c) 2026 Caleb L. Power.
+MIT. See [`LICENSE`](LICENSE). Copyright (c) 2026 Axonibyte Innovations, LLC.

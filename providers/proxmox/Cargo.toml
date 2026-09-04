@@ -2,6 +2,7 @@
 name = "reaper-provider-proxmox"
 description = "Proxmox VE provider for reaper."
 version = "0.1.1"
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/calebpower/reaper/manifest/schema/v1.json",
+  "$id": "https://bitbucket.org/axonibyte/reaper/manifest/schema/v1.json",
   "title": "reaper tenant manifest, schema version 1",
   "description": "The entire integration surface between a project and reaper. See docs/tenants.md. Two schemas live in this file: the root schema validates the document as written, and $defs/resolvedGuest validates each guest after top-level defaults have been merged with that guest's overrides. The second pass is where execution-mode coherence is enforced, because inheritance is not something JSON Schema can compute.",
   "type": "object",

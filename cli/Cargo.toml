@@ -2,6 +2,7 @@
 name = "reaper"
 description = "Ephemeral test-VM harness for the pre-push loop."
 version = "0.1.1"
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
