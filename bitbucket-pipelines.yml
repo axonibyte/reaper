@@ -1,0 +1,158 @@
+# Pinned rather than :latest so a tag build today and a rebuild next year use
+# the same compiler. Bump deliberately, together with the nightly pin in
+# ci/build-target.sh.
+#
+# The -bookworm suffix is not cosmetic and is not inherited from the sibling
+# repositories. The Linux binaries are linked against whatever glibc this image
+# carries, which makes the image tag the project's portability floor whether
+# anybody chose it or not -- and v0.1.0 shipped Linux binaries demanding
+# GLIBC_2.39 for exactly that reason, so they would not start on Debian 12,
+# Ubuntu 22.04 or RHEL 9. Bookworm is glibc 2.36. Floating to :latest would
+# hand that decision back to whichever base Docker Hub happens to be shipping.
+image: rust:1.97-bookworm
+
+definitions:
+  caches:
+    cargo:
+      key:
+        files:
+          - Cargo.lock
+      path: .cargo_cache
+
+  steps:
+    - step: &doMirror
+        name: Mirror repository
+        clone:
+          enabled: false
+        script:
+          - git clone --mirror git@bitbucket.org:${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}.git
+          - cd ${BITBUCKET_REPO_SLUG}.git
+          - git push --mirror git@github.com:${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}.git
+
+    - step: &doFetchAndTest
+        name: Fetch dependencies and run the gate
+        caches:
+          - cargo
+        script:
+          - export CARGO_HOME="$BITBUCKET_CLONE_DIR/.cargo_cache"
+          # tools/check.sh needs all three, and says so rather than passing
+          # without them: rsync because reaper drives it, shellcheck because
+          # reaper is half shell, jq because the sweeper's self-test reads
+          # canned API replies.
+          - apt-get -qq update && apt-get -qq install -y --no-install-recommends rsync shellcheck jq
+          - cargo fetch --locked
+          # Checked here rather than beside the upload, so a tag that disagrees
+          # with the crate costs one step instead of four cross-builds. The
+          # binary's own --version is what a user will quote back in a bug
+          # report; a release where that contradicts the tag it hangs under is
+          # one nobody can reason about afterwards.
+          - |
+            if [[ -n "${BITBUCKET_TAG:-}" ]]; then
+              VERSION=$(sed -n '/^\[package\]/,/^\[/{s/^version *= *"\([^"]*\)".*/\1/p;}' cli/Cargo.toml)
+              test -n "${VERSION}"
+              if [[ "${BITBUCKET_TAG}" != "v${VERSION}" ]]; then
+                echo "tag ${BITBUCKET_TAG} does not match cli/Cargo.toml v${VERSION}" >&2
+                exit 1
+              fi
+              echo "tag ${BITBUCKET_TAG} and crate v${VERSION} agree"
+            fi
+          - cargo test --workspace --locked
+          # The project's own gate, unmodified and entire: warnings-as-errors
+          # across every target, shell lint, the seam guards, the invariant
+          # battery, and the manifest, runner and sweeper suites. What a commit
+          # is expected to pass locally is what it is expected to pass here.
+          - ./tools/check.sh
+
+    - step: &buildLinuxAmd64
+        name: Build x86_64-unknown-linux-gnu
+        caches:
+          - cargo
+        artifacts:
+          - dist/*
+        script:
+          - sh ci/build-target.sh x86_64-unknown-linux-gnu
+
+    - step: &buildLinuxArm64
+        name: Build aarch64-unknown-linux-gnu
+        caches:
+          - cargo
+        artifacts:
+          - dist/*
+        script:
+          - sh ci/build-target.sh aarch64-unknown-linux-gnu
+
+    - step: &buildFreebsdAmd64
+        name: Build x86_64-unknown-freebsd
+        caches:
+          - cargo
+        artifacts:
+          - dist/*
+        script:
+          - sh ci/build-target.sh x86_64-unknown-freebsd
+
+    - step: &buildFreebsdArm64
+        name: Build aarch64-unknown-freebsd
+        caches:
+          - cargo
+        artifacts:
+          - dist/*
+        script:
+          - sh ci/build-target.sh aarch64-unknown-freebsd
+
+    - step: &doDeploy
+        name: Deploy multi-target artifacts
+        clone:
+          enabled: false
+        script:
+          - |
+            for f in dist/*; do
+              if [[ -f "$f" && "$f" != *.sha256 ]]; then
+                echo "Uploading $f..."
+                sha256sum "$f" | awk '{ print $1 }' > "${f}.sha256"
+                curl -sS --fail-with-body \
+                  -H "Authorization: Bearer ${BB_PUB_SECRET}" \
+                  -X POST "https://api.bitbucket.org/2.0/repositories/${BITBUCKET_REPO_OWNER}/${BITBUCKET_REPO_SLUG}/downloads" \
+                  --form files=@"${f}" --form files=@"${f}.sha256"
+                echo "Uploaded $f + checksum"
+              fi
+            done
+
+pipelines:
+  branches:
+    main:
+      - step: *doMirror
+      - step: *doFetchAndTest
+      # No Windows target: reaper is Unix by construction rather than by
+      # configuration, and a Windows build fails to compile rather than at
+      # runtime. ci/build-target.sh carries the specifics.
+      - parallel: &buildAll
+          steps:
+            - step: *buildLinuxAmd64
+            - step: *buildLinuxArm64
+            - step: *buildFreebsdAmd64
+            - step: *buildFreebsdArm64
+
+    '{feature/**,bugfix/**,release/**,hotfix/**}':
+      - step: *doMirror
+      - step: *doFetchAndTest
+
+    '**':
+      - step: *doMirror
+
+  tags:
+    '**':
+      - step: *doMirror
+      - step: *doFetchAndTest
+      - parallel: *buildAll
+      - step: *doDeploy
+
+  # Run by hand from the Pipelines UI, so the whole matrix can be proved
+  # without minting a release. Builds and hashes nothing, publishes nothing --
+  # it exists because main and tags are otherwise the only refs that compile
+  # the cross targets, and "push a tag and find out" is not a test strategy.
+  # The FreeBSD legs especially: they are cross-linked here rather than built
+  # natively, so this is the cheapest way to ask whether that still works.
+  custom:
+    build-matrix:
+      - step: *doFetchAndTest
+      - parallel: *buildAll

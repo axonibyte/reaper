@@ -93,16 +93,24 @@ guard_guest() {
     # with a platform sub-module; it is a single shell script delivered over
     # SSH, so the directory is the boundary.
     #
-    # .github/workflows/ is allowed because it names *build hosts*, not
-    # guests, and the two are unrelated questions. This seam exists so that
-    # adding a guest system is a template build and a registry entry rather
-    # than a code change; a release matrix saying which machines compile the
-    # binary cannot make that false, and no reaper code reads these files.
-    # Narrow deliberately: it is that one directory, and the tenant and
-    # provider seams below still apply to it in full -- a workflow naming a
+    # bitbucket-pipelines.yml and ci/ are allowed because they name *build
+    # hosts*, not guests, and the two are unrelated questions. This seam exists
+    # so that adding a guest system is a template build and a registry entry
+    # rather than a code change; a release matrix saying which machines compile
+    # the binary cannot make that false, and no reaper code reads these files.
+    #
+    # This replaces the .github/workflows/ exemption rather than adding to it.
+    # That directory was deleted when the repository moved to Bitbucket, and
+    # the release matrix it used to hold now lives in these two places: the
+    # pipeline names the targets, ci/build-target.sh knows what each one needs
+    # to link. An exemption kept alive after its files are gone is a place
+    # coupling can hide, so it went with them.
+    #
+    # Narrow deliberately: one named file and one directory, and the tenant and
+    # provider seams below still apply to both in full -- a pipeline naming a
     # tenant, or reaching for a hypervisor's API, is still a failure.
     scan "guest seam" \
-        '^(docs/|README\.md$|manifest/examples/|\.reaper\.toml$|runner/|tools/guards\.sh$|\.github/workflows/)' \
+        '^(docs/|README\.md$|manifest/examples/|\.reaper\.toml$|runner/|tools/guards\.sh$|bitbucket-pipelines\.yml$|ci/)' \
         'systemctl|systemd|apt-get|dpkg |zfsutils-linux|/dev/(vd|vtbd|sd|nvme)[a-z0-9]|rc\.conf|\brc\.d\b|\b(ubuntu|debian|freebsd|alpine|centos|fedora)\b' \
         "An operating system leaked out of the runner's platform modules. The
 guest seam exists so that adding a system is a template build and a

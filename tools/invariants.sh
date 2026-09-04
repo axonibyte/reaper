@@ -260,19 +260,27 @@ printf '\n--- the gate: what reviews the reviewers ---\n\n'
 # dependencies.)
 #
 # Widened once, 2026-08-22, on Cal's decision and for the reason already in
-# the parenthesis above: GitHub defines the format its workflows are written
-# in and this project does not get a vote, so a workflow is vendor-mandated
+# the parenthesis above: a CI vendor defines the format its pipelines are
+# written in and this project does not get a vote, so one is vendor-mandated
 # YAML in exactly the sense a runbook heredoc is. The original wording drew
 # the line at content rather than files because no such file existed yet.
 #
-# The exemption is one directory wide and nothing else. YAML anywhere else in
-# the tree -- including elsewhere under .github/ -- still fails, and the
-# companion check below still refuses a YAML parser in the dependency tree,
-# which is the half that would put a YAML surface in reaper itself.
-sources | grep -E '\.(ya?ml)$' | grep -vE '^\.github/workflows/[^/]+\.ya?ml$' | offenders \
-    "no YAML files outside .github/workflows" \
-    "This project speaks TOML everywhere. GitHub's workflow format is the one
-exemption, and it is that directory only. Convert the file."
+# Re-pointed, 2026-09-04, when the repository moved to Bitbucket: the exempt
+# file is now bitbucket-pipelines.yml, whose name and location Bitbucket
+# chooses. This is a move rather than a second grant -- .github/workflows/ was
+# deleted in the same change, so leaving its carve-out standing would have left
+# an exemption with nothing behind it, which is precisely a place for something
+# to hide later.
+#
+# The exemption is one file wide and nothing else. It is anchored and fully
+# spelled, so a sibling like bitbucket-pipelines.dev.yml is not covered. YAML
+# anywhere else in the tree still fails, and the companion check below still
+# refuses a YAML parser in the dependency tree, which is the half that would
+# put a YAML surface in reaper itself.
+sources | grep -E '\.(ya?ml)$' | grep -vE '^bitbucket-pipelines\.yml$' | offenders \
+    "no YAML files outside bitbucket-pipelines.yml" \
+    "This project speaks TOML everywhere. Bitbucket's pipeline format is the one
+exemption, and it is that one file. Convert the file."
 
 sources | grep -E 'Cargo\.(toml|lock)$' | xargs grep -n 'yaml' 2>/dev/null | offenders \
     "no YAML parser in the dependency tree" \

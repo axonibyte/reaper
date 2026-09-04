@@ -138,24 +138,33 @@ cargo build --release          # target/release/reaper
 ```
 
 Tagging `v<version>` builds it for x86-64 and arm64 Linux and x86-64 and arm64
-FreeBSD, and attaches the binaries to the release alongside a `hashes.txt` that
-`sha256sum -c` reads directly. Each is built against the oldest system it is
-meant to run on -- Debian 12's glibc, and FreeBSD 14 -- because both platforms
-are forward compatible and neither is backward compatible, so building on the
-newest thing available produces a binary that will not start on anything else. Each is a single self-contained file: the runner
-is compiled in, so there is nothing to unpack and nothing to install beside it.
-There is no Windows build, and that is a property of the program rather than of
-the pipeline -- see the header of
-[`.github/workflows/release.yml`](.github/workflows/release.yml).
+FreeBSD, and uploads each binary to Bitbucket Downloads beside a `.sha256` file
+holding its checksum. The Linux binaries are built against Debian 12's glibc
+rather than whatever the newest base image carries, because the platform is
+forward compatible and not backward compatible, so building on the newest thing
+available produces a binary that will not start on anything else. Each is a
+single self-contained file: the runner is compiled in, so there is nothing to
+unpack and nothing to install beside it. There is no Windows build, and that is
+a property of the program rather than of the pipeline -- see the header of
+[`ci/build-target.sh`](ci/build-target.sh).
 
 Nothing is installed into a guest. The runner is compiled into the binary and
 delivered over SSH on every operation, so upgrading reaper never means
 rebuilding a template.
 
-> Building on FreeBSD or another BSD? Build natively. There is no
-> cross-compilation here, which is also why `rustls` is mandatory and
+> Building on FreeBSD or another BSD? Build natively. `rustls` is mandatory and
 > `native-tls` is banned -- an OpenSSL linkage difference between build hosts is
-> exactly the kind of portability failure that shows up late and confusingly.
+> exactly the kind of portability failure that shows up late and confusingly,
+> and a pure-Rust TLS stack is the reason this project has no such difference to
+> have.
+>
+> That ban is also what makes the released FreeBSD binaries possible at all.
+> Bitbucket Pipelines runs Linux containers and cannot host a VM, so those two
+> targets are cross-linked with `cargo-zigbuild` rather than built on FreeBSD.
+> Nothing in the dependency graph links a system library, which is what keeps
+> that honest -- but it is a weaker claim than a native build, and a released
+> FreeBSD binary is worth smoke-testing on the oldest release it targets before
+> it is announced.
 
 ### 2. Set up a site *(sysadmin, once)*
 
