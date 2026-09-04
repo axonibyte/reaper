@@ -428,6 +428,35 @@ fn a_missing_manifest_says_what_to_do_about_it() {
     assert!(err.contains("docs/tenants.md"), "{err}");
 }
 
+/// Is this pid a process that is still *running*?
+///
+/// Deliberately not `kill(pid, 0)` alone. That answers "is there an entry in
+/// the process table", and a process that has exited keeps one until its
+/// parent reaps it -- so it says "yes" for a corpse. The heartbeat is orphaned
+/// by design, which means the parent that has to reap it is whatever init the
+/// machine has: a workstation's does it the instant the process dies, a
+/// container's pid 1 is often a shell that never does it at all.
+///
+/// These assertions are about whether `down` stopped the process. Whether
+/// somebody else's init has got around to tidying up afterwards is a different
+/// question, and one this test has no business failing over -- it did, in CI,
+/// for months after passing everywhere else. `ps` is the same instrument
+/// cli/src/proc.rs uses, chosen there for the same portability reason.
+///
+/// Note what this still catches: a heartbeat `down` failed to stop is running,
+/// not defunct, so the assertion below is no weaker than it was.
+fn still_running(pid: u32) -> bool {
+    // Safety: kill with signal 0 delivers nothing and only inspects.
+    if unsafe { libc::kill(pid as i32, 0) } != 0 {
+        return false;
+    }
+    let out = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "state="])
+        .output()
+        .expect("ps");
+    out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().starts_with('Z')
+}
+
 #[test]
 fn a_heartbeat_is_started_and_stopped_with_the_session() {
     let h = Harness::new("heartbeat");
@@ -440,10 +469,7 @@ fn a_heartbeat_is_started_and_stopped_with_the_session() {
         .and_then(|l| l.split_whitespace().last())
         .and_then(|p| p.parse().ok())
         .unwrap_or_else(|| panic!("no heartbeat pid in:\n{listed}"));
-    assert!(
-        unsafe { libc::kill(pid as i32, 0) } == 0,
-        "the heartbeat should be running"
-    );
+    assert!(still_running(pid), "the heartbeat should be running");
 
     // It must be its own session leader, or it dies with the terminal that
     // started it -- which offline testing cannot notice, because nothing here
@@ -462,7 +488,7 @@ fn a_heartbeat_is_started_and_stopped_with_the_session() {
     h.ok(&["down"]);
     std::thread::sleep(Duration::from_millis(200));
     assert!(
-        unsafe { libc::kill(pid as i32, 0) } != 0,
+        !still_running(pid),
         "down should have stopped the heartbeat"
     );
 }

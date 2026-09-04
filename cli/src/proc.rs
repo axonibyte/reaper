@@ -3,12 +3,53 @@
 /// Is a process with this identifier alive?
 ///
 /// Signal 0 performs the permission and existence checks without delivering
-/// anything, which is the standard way to ask. It cannot distinguish "gone"
-/// from "alive but not ours"; for a process this one started, that difference
-/// does not arise.
+/// anything, which is the standard way to ask -- but what it actually answers
+/// is "is there an entry in the process table", and a process that has exited
+/// keeps one until its parent reaps it. Those are the same question only when
+/// something reaps promptly.
+///
+/// For the heartbeat they are not. It is orphaned by design -- `up` spawns it,
+/// never waits, and exits -- so the parent it inherits is whatever init the
+/// machine has, and how quickly that reaps is not something reaper gets to
+/// assume: a workstation's init does it the instant the process dies, a
+/// container's pid 1 is often a shell that never reaps at all. A heartbeat
+/// that has exited has stopped renewing whether or not anyone has collected
+/// the corpse, so counting it alive is wrong in both directions -- it is why
+/// `stop` reported a process it had just killed as unstoppable, and why `up`
+/// would reuse a session whose dead-man's switch had already fired.
+///
+/// It still cannot distinguish "gone" from "alive but not ours"; for a process
+/// this one started, that difference does not arise.
 pub fn is_alive(pid: u32) -> bool {
     // Safety: kill with signal 0 delivers nothing and only inspects.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+        return false;
+    }
+    !is_zombie(pid)
+}
+
+/// Has this process terminated, leaving only an unreaped entry behind?
+///
+/// Asked through `ps` for the reason `looks_like_heartbeat` gives: it is the
+/// one spelling that works on both systems reaper's CLI runs on, where /proc
+/// is Linux-only and not always mounted even there. The state field is `Z` on
+/// both, sometimes with flags after it, so match the first letter rather than
+/// the whole string.
+///
+/// If `ps` cannot answer, the honest reply is "not known to be a zombie",
+/// which leaves `is_alive` exactly as conservative as it was before this
+/// existed -- a process is never declared dead on the strength of a missing
+/// answer.
+fn is_zombie(pid: u32) -> bool {
+    match std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "state="])
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).trim().starts_with('Z')
+        }
+        _ => false,
+    }
 }
 
 /// Ask a process to stop, and confirm it did.
@@ -69,6 +110,56 @@ mod tests {
         // This test process is alive and is not a heartbeat; killing it on
         // the strength of a recorded number would be the bug.
         assert_eq!(looks_like_heartbeat(std::process::id()), Some(false));
+    }
+
+    #[test]
+    fn a_zombie_is_not_alive() {
+        // A process that has exited but has not been reaped keeps its entry in
+        // the process table, and kill(pid, 0) still succeeds on it. `spawn`
+        // without `wait` is exactly the shape `up` leaves the heartbeat in, so
+        // this test makes itself the parent that has not reaped -- which is
+        // what makes the window deterministic here.
+        //
+        // In the wild the window's length is somebody else's decision: this
+        // was found by CI, where a container's pid 1 never reaps and the
+        // window is forever, after passing for months on a workstation whose
+        // init closes it within microseconds. Owning the child removes that
+        // difference from the test.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let pid = child.id();
+
+        // `true` exits immediately, but "has exited" and "is visible as
+        // exited" are not the same instant.
+        let mut corpse = false;
+        for _ in 0..200 {
+            if is_zombie(pid) {
+                corpse = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            corpse,
+            "the child never became a zombie, so this test cannot check what it exists to check"
+        );
+
+        // The trap, stated: the raw syscall still says the identifier exists.
+        // Safety: kill with signal 0 delivers nothing and only inspects.
+        assert_eq!(
+            unsafe { libc::kill(pid as libc::pid_t, 0) },
+            0,
+            "an unreaped child should still answer kill(pid, 0)"
+        );
+        // And the judgement that must not be fooled by it. A heartbeat that
+        // has exited is not renewing anything, reaped or not.
+        assert!(
+            !is_alive(pid),
+            "a process that has exited is not alive, whoever has or has not reaped it"
+        );
+
+        child.wait().expect("reap");
     }
 
     #[test]
