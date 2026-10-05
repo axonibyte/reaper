@@ -7,6 +7,48 @@
 
 use super::*;
 
+/// A scratch directory unique to this CALL, removed on drop.
+///
+/// The counter is the whole point. Both helpers below used to name the
+/// directory after `text.len()`, so two cases whose text happened to be the
+/// same length shared one directory -- and `Drop` runs `remove_dir_all`, so
+/// whichever finished first deleted the file the other was still reading.
+/// Sequentially that is invisible (the first is dropped before the second is
+/// built); under `cargo test`'s threads it fails as
+/// "m.toml: cannot read: No such file or directory", from a test that never
+/// touches the filesystem on purpose. Observed on
+/// reaper-manifest-err-5439-104.
+struct Scratch(std::path::PathBuf);
+
+impl Drop for Scratch {
+    // Drop, not a call at the end: a panic inside load() must still remove the
+    // directory. The invariants battery refuses this file without it, and it
+    // caught this very helper leaking on its first draft.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl Scratch {
+    fn new(label: &str) -> Scratch {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "reaper-manifest-{label}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        Scratch(dir)
+    }
+
+    fn file(&self, name: &str, body: &str) -> std::path::PathBuf {
+        let path = self.0.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+}
+
 fn fixture(rel: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
 }
@@ -378,23 +420,8 @@ run = { exec = "host", cmd = "make check" }
 /// Load from a string by way of a scratch file, for shapes small enough that
 /// a fixture file would just put distance between the test and its data.
 fn load_str(text: &str) -> Manifest {
-    // Drop, not a call at the end: a panic inside load() must still remove
-    // the directory. The invariants battery refuses this file without it,
-    // and it caught this very helper leaking on its first draft.
-    struct Scratch(std::path::PathBuf);
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    let dir = Scratch(std::env::temp_dir().join(format!(
-        "reaper-manifest-test-{}-{}",
-        std::process::id(),
-        text.len()
-    )));
-    std::fs::create_dir_all(&dir.0).unwrap();
-    let path = dir.0.join("m.toml");
-    std::fs::write(&path, text).unwrap();
+    let dir = Scratch::new("test");
+    let path = dir.file("m.toml", text);
     load(&path).unwrap_or_else(|e| panic!("should load: {e}"))
 }
 
@@ -404,25 +431,41 @@ fn load_str(text: &str) -> Manifest {
 
 /// Like load_str, for text that must be refused.
 fn load_str_err(text: &str) -> Vec<String> {
-    struct Scratch(std::path::PathBuf);
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    let dir = Scratch(std::env::temp_dir().join(format!(
-        "reaper-manifest-err-{}-{}",
-        std::process::id(),
-        text.len()
-    )));
-    std::fs::create_dir_all(&dir.0).unwrap();
-    let path = dir.0.join("m.toml");
-    std::fs::write(&path, text).unwrap();
+    let dir = Scratch::new("err");
+    let path = dir.file("m.toml", text);
     match load(&path) {
         Ok(_) => panic!("should have been refused:\n{text}"),
         Err(Error::Invalid { problems, .. }) => problems,
         Err(e) => panic!("expected Invalid, got {e}"),
     }
+}
+
+#[test]
+fn two_scratch_dirs_in_one_process_do_not_share_a_directory() {
+    // The deterministic form of a race that only showed under cargo's
+    // threads. The old helper keyed the directory on `text.len()`, so same
+    // length meant same directory; here the two bodies are deliberately the
+    // same length. Holding the first alive while the second is built and
+    // dropped reproduces the damage without needing two threads to interleave
+    // -- `remove_dir_all` in Drop took the other case's file with it.
+    let keep = Scratch::new("collide");
+    let kept = keep.file("m.toml", "aaaa");
+    assert!(kept.exists());
+
+    {
+        let other = Scratch::new("collide");
+        let _ = other.file("m.toml", "bbbb");
+        assert_ne!(
+            keep.0, other.0,
+            "two calls must not name one directory, whatever the text"
+        );
+    }
+
+    assert!(
+        kept.exists(),
+        "another scratch's drop removed this one's file: {}",
+        kept.display()
+    );
 }
 
 const SKELETON: &str =
