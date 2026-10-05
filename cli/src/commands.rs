@@ -610,6 +610,70 @@ fn start_heartbeat(session: &str) -> Result<Option<u32>> {
     Ok(Some(child.id()))
 }
 
+/// What the cluster says about the machines this box has records for.
+///
+/// Asked of `Provider`, never of a particular provider: reconciliation is the
+/// trait's `list()`, so a second provider gets this by implementing what it
+/// already must.
+enum ClusterView {
+    /// The provider answered. Its `list` is every machine it is responsible
+    /// for, so a session missing from it is really missing.
+    Answered {
+        provider: String,
+        machines: Vec<MachineRef>,
+    },
+    /// No answer -- unconfigured, unreachable, or refused.
+    ///
+    /// NOT absence, and the distinction is the whole reason this is an enum
+    /// rather than an empty vector. An unreachable hypervisor rendered as a
+    /// pool containing nothing reads as every session having died at once,
+    /// which is the most alarming thing `list` could say and would be said
+    /// precisely when it knows least.
+    Silent(String),
+}
+
+fn cluster_view() -> ClusterView {
+    let cfg = match load_config() {
+        Ok(c) => c,
+        // `list` answered from the store alone for as long as it existed, so a
+        // box with records and no usable configuration still gets its table.
+        Err(e) => return ClusterView::Silent(format!("no usable configuration ({e})")),
+    };
+    let provider = match provider_for(&cfg) {
+        Ok(p) => p,
+        Err(e) => return ClusterView::Silent(format!("the provider could not be built ({e})")),
+    };
+    match provider.list() {
+        Ok(machines) => ClusterView::Answered {
+            provider: provider.name().to_string(),
+            machines: machines.into_iter().map(|m| m.machine).collect(),
+        },
+        Err(e) => ClusterView::Silent(format!("{} did not answer ({e})", provider.name())),
+    }
+}
+
+/// The CLUSTER column for one session.
+fn cluster_verdict(s: &Session, view: &ClusterView) -> &'static str {
+    let (provider, machines) = match view {
+        ClusterView::Silent(_) => return "-",
+        ClusterView::Answered { provider, machines } => (provider, machines),
+    };
+    // `None` is a record written before reaper recorded the provider, when
+    // configuration named exactly one -- so it is THIS one. Reading it as "any
+    // provider" would let a record from another cluster be judged against this
+    // listing, which is the wrong answer in the one direction that destroys
+    // something.
+    let recorded = s.provider.as_deref().unwrap_or(provider.as_str());
+    if recorded != provider.as_str() {
+        return "elsewhere";
+    }
+    if machines.contains(&s.machine) {
+        "ok"
+    } else {
+        "GONE"
+    }
+}
+
 pub fn list() -> Result<()> {
     let store = Store::open();
     let sessions = store.list()?;
@@ -619,10 +683,17 @@ pub fn list() -> Result<()> {
         return Ok(());
     }
 
+    // The store is this workstation's file, and a record is not a machine. Two
+    // actors read the same session name on two boxes and saw records 394 hours
+    // apart, each given a true answer about a different object; a `down` aimed
+    // at the stale one is destructive against a machine the pool has since
+    // handed to somebody else.
+    let view = cluster_view();
+
     let now = SystemTime::now();
     say!(
-        "{:<24} {:<16} {:<8} {:<10} {:<16} {}",
-        "SESSION", "GUEST", "AGE", "EXPIRES", "ADDRESS", "HEARTBEAT"
+        "{:<24} {:<16} {:<8} {:<10} {:<16} {:<12} {}",
+        "SESSION", "GUEST", "AGE", "EXPIRES", "ADDRESS", "HEARTBEAT", "CLUSTER"
     );
     for s in sessions {
         let expires = match s.remaining(now) {
@@ -644,14 +715,21 @@ pub fn list() -> Result<()> {
             None => "none".to_string(),
         };
         say!(
-            "{:<24} {:<16} {:<8} {:<10} {:<16} {}",
+            "{:<24} {:<16} {:<8} {:<10} {:<16} {:<12} {}",
             s.name,
             s.guest,
             duration::format_rough(s.age(now)),
             expires,
             s.address.map(|a| a.to_string()).unwrap_or_else(|| "-".into()),
-            heartbeat
+            heartbeat,
+            cluster_verdict(&s, &view)
         );
+    }
+    if let ClusterView::Silent(why) = &view {
+        // Said once, under the table, rather than as a value in every row: the
+        // column already reads `-`, and what a reader needs is why it is not
+        // an answer.
+        say!("the cluster was not consulted: {why}. CLUSTER says nothing in this listing");
     }
     Ok(())
 }

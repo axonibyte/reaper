@@ -463,10 +463,15 @@ fn a_heartbeat_is_started_and_stopped_with_the_session() {
     h.ok(&["up"]);
 
     let listed = h.ok(&["list"]);
+    // The HEARTBEAT column by POSITION, not `last()`. Reading the last field
+    // was wrong before CLUSTER was ever added: a stopped heartbeat renders as
+    // `<pid> DEAD`, so `last()` returns "DEAD" and the parse fails -- this
+    // only ever passed because the heartbeat here is alive. Columns are
+    // name, guest, age, expires, address, heartbeat.
     let pid: u32 = listed
         .lines()
         .find(|l| l.starts_with("a-project"))
-        .and_then(|l| l.split_whitespace().last())
+        .and_then(|l| l.split_whitespace().nth(5))
         .and_then(|p| p.parse().ok())
         .unwrap_or_else(|| panic!("no heartbeat pid in:\n{listed}"));
     assert!(still_running(pid), "the heartbeat should be running");
@@ -1855,6 +1860,65 @@ fn a_corrupt_store_is_a_sentence_not_a_panic() {
     assert!(
         err.contains("sessions.json"),
         "name the file somebody must look at: {err}"
+    );
+}
+
+#[test]
+fn list_says_gone_for_a_session_the_cluster_no_longer_has() {
+    let h = Harness::new("listgone");
+    h.ok(&["up"]);
+    let m = h.hypervisor.machine_named("a-project").expect("machine");
+    h.hypervisor.hide_from_listing(m.parse().expect("an id this provider issued"));
+
+    let list = h.ok(&["list"]);
+    assert!(
+        list.contains("GONE"),
+        "the record outlived the machine and the table must say so: {list}"
+    );
+}
+
+#[test]
+fn a_cluster_that_cannot_be_read_is_not_a_cluster_with_nothing_in_it() {
+    let h = Harness::new("listsilent");
+    h.ok(&["up"]);
+    // The listing answers null rather than a list. Counting that as "no
+    // machines" would render every session GONE at the exact moment reaper
+    // knows least -- the most alarming thing this table can say, said on no
+    // evidence.
+    h.hypervisor.listing_unreadable(true);
+
+    let list = h.ok(&["list"]);
+    assert!(!list.contains("GONE"), "an outage is not a death: {list}");
+    assert!(
+        list.contains("the cluster was not consulted"),
+        "say why the column is empty: {list}"
+    );
+    assert!(list.contains("a-project"), "and still show the record: {list}");
+}
+
+#[test]
+fn a_session_recorded_against_another_provider_is_not_judged_by_this_one() {
+    let h = Harness::new("listelsewhere");
+    // A machine this cluster has never issued, recorded as another provider's.
+    // Judged against THIS listing it would read GONE, and that is the wrong
+    // answer in the one direction that destroys something: `down` is aimed by
+    // what `list` shows, and ids are recycled pool-wide.
+    write(
+        &h.dir.join("sessions.json"),
+        r#"{"version":1,"sessions":{"from-elsewhere":{
+             "name":"from-elsewhere","project":"p","guest":"a-guest",
+             "template":"t","machine":"99999","address":null,
+             "created_at":1700000000,"ready_at":null,"expires_at":4102444800,
+             "ttl":7200,"heartbeat_pid":null,"synced_at":null,
+             "provider":"some-other-cloud"}}}"#,
+        None,
+    );
+
+    let list = h.ok(&["list"]);
+    assert!(list.contains("elsewhere"), "{list}");
+    assert!(
+        !list.contains("GONE"),
+        "absence from a cluster it was never on is not absence: {list}"
     );
 }
 
