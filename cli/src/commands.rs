@@ -251,6 +251,7 @@ pub fn up(
             ttl,
             heartbeat_pid: None,
             synced_at: None,
+            provider: Some(provider.name().to_string()),
         };
         store.put(session.clone())?;
 

@@ -148,6 +148,24 @@ pub struct Session {
     /// fail, and a failure there would read as though results had been lost.
     #[serde(with = "epoch_opt", default)]
     pub synced_at: Option<SystemTime>,
+
+    /// The provider whose cluster this machine lives on, as `Provider::name()`
+    /// spells it.
+    ///
+    /// `None` is a record written before reaper recorded this, when site
+    /// configuration named exactly one provider. A reader may therefore treat
+    /// it as the configured provider, and must not treat it as "any provider".
+    /// The difference is invisible today and decides the question the moment a
+    /// second one exists: reconciling a session against a cluster turns "no
+    /// machine there by this name" into "this machine is gone", and for a
+    /// record that cannot say WHICH cluster it belongs to, that conclusion is
+    /// indistinguishable from a machine sitting safely on the other one.
+    ///
+    /// Additive on purpose, with no bump to `VERSION`. A bump would make every
+    /// store already on disk read as "written by a different version of
+    /// reaper", which is a worse failure than the one it would be guarding.
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 impl Session {
