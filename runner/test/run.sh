@@ -119,7 +119,15 @@ sysctl)
         *)               : ;;
     esac ;;
 gpart)
-    rc "gpart_${2:-none}.rc" 1 ;;
+    # The disk is the last argument that is not a flag or a verb: `gpart show
+    # -p vtbd1` puts it third where `gpart show vtbd1` put it second, and
+    # keying on $2 silently read "-p" as a device name.
+    gpart_disk=none
+    for gpart_a in "$@"; do
+        case "${gpart_a}" in -*|show|list) : ;; *) gpart_disk=${gpart_a} ;; esac
+    done
+    fix "gpart_${gpart_disk}.out"
+    rc "gpart_${gpart_disk}.rc" 1 ;;
 fstyp)
     arg=${1:-none}
     rc "fstyp_${arg##*/}.rc" 1 ;;
@@ -137,6 +145,9 @@ fstat)
     fix fstat ;;
 zpool)
     case "$1" in
+        import)
+            # No fixture means no importable pool, which is the ordinary case.
+            fix zpool_import ;;
         list)
             case "$*" in
                 *health*) printf 'ONLINE\n'; exit 0 ;;
@@ -432,6 +443,65 @@ FAKE_PLATFORM=FreeBSD
 printf 'cd0\n' > "${WORK}/fix/kern_disks"
 fixture_rc pool_exists.rc 1
 if run_runner firstboot; then bad "should have refused"; else ok "refused"; fi
+errsays 'no unused disk'
+made_no_pool
+
+new_case "freebsd: a GPT recovered from its secondary is residue, and the pool is built on it"
+# THE REGRESSION. A session volume whose blocks Proxmox recycled from a
+# destroyed pool: the primary GPT is gone, the backup in the last sector
+# survives, GEOM falls back to it, and `gpart show` therefore SUCCEEDS. The old
+# rule read that success as "has a partition table" and refused the only disk
+# the provider had attached -- candidates came back empty and firstboot died
+# with "no unused disk" on a blank machine. Fixtures are the live readings from
+# a 64G volume on bass.
+FAKE_PLATFORM=FreeBSD
+printf 'vtbd1 vtbd0\n' > "${WORK}/fix/kern_disks"
+fixture_rc gpart_vtbd0.rc 0      # the root disk: a table GEOM trusts
+fixture_rc gpart_vtbd1.rc 0      # gpart SUCCEEDS here too...
+cat > "${WORK}/fix/gpart_vtbd1.out" <<'OUT'
+=>       34  134217661    vtbd1  GPT  (64G) [CORRUPT]
+         34       2014           - free -  (1007K)
+       2048  134197248  vtbd1p1  apple-zfs  (64G)
+  134199296      16384  vtbd1p9  solaris-reserved  (8.0M)
+OUT
+# ...and zfs cannot use what is left of it.
+cat > "${WORK}/fix/zpool_import" <<'OUT'
+   pool: tank
+     id: 5373674619073761093
+  state: UNAVAIL
+ config:
+	tank        UNAVAIL  insufficient replicas
+	  vtbd1p1   UNAVAIL  invalid label
+OUT
+fixture_rc fstyp_vtbd1.rc 1
+fixture_rc pool_exists.rc 1
+if run_runner firstboot; then :; else bad "firstboot should have succeeded"; fi
+log_has 'zpool create .* vtbd1'
+log_lacks 'zpool create .* vtbd0'
+
+new_case "freebsd: a corrupt table is still refused while zfs can import from it"
+# THE SAFETY HALF, and the reason it cannot be left to fstyp: fstyp on 15.1
+# does not know zfs -- it reports exfat, ext2fs, geli and ntfs -- so a partition
+# holding a HEALTHY pool reads "filesystem not recognized" exactly as a dead one
+# does. Only zpool can tell them apart, so only zpool is asked.
+FAKE_PLATFORM=FreeBSD
+printf 'vtbd1\n' > "${WORK}/fix/kern_disks"
+fixture_rc gpart_vtbd1.rc 0
+cat > "${WORK}/fix/gpart_vtbd1.out" <<'OUT'
+=>       34  134217661    vtbd1  GPT  (64G) [CORRUPT]
+       2048  134197248  vtbd1p1  apple-zfs  (64G)
+OUT
+cat > "${WORK}/fix/zpool_import" <<'OUT'
+   pool: tank
+     id: 5373674619073761093
+  state: ONLINE
+ config:
+	tank        ONLINE
+	  vtbd1p1   ONLINE
+OUT
+fixture_rc fstyp_vtbd1.rc 1
+fixture_rc pool_exists.rc 1
+if run_runner firstboot; then bad "should have refused a disk zfs can still import"; else ok "refused"; fi
 errsays 'no unused disk'
 made_no_pool
 

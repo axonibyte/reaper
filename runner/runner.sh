@@ -150,10 +150,73 @@ disks_linux() {
 
 # FreeBSD: no single tool says it all, so ask three questions. Any "yes" means
 # the disk is spoken for.
+# True when zpool can still import a pool from this disk or a partition of it.
+#
+# Asked only where a corrupt table has been accepted as residue below, and it
+# is the only tool that can answer: fstyp on 15.1 does not know zfs at all --
+# it reports exfat, ext2fs, geli and ntfs -- so a partition holding a HEALTHY
+# pool reads "filesystem not recognized" exactly as a dead one does. Without
+# this, an un-imported pool whose primary GPT had been zeroed would read as an
+# empty disk.
+#
+# Only lines naming this disk or one of its partitions are considered, and such
+# a line keeps the disk unless zpool itself marks it unusable.
+importable_from() {
+    zpool import 2>/dev/null | awk -v d="$1" '
+        {
+            dev = $1
+            if (dev != d && index(dev, d) != 1) next
+            rest = substr(dev, length(d) + 1)
+            if (dev != d && !(rest ~ /^p?[0-9]+$/ || rest ~ /^s[0-9]+[a-z]?$/)) next
+            if ($0 !~ /UNAVAIL|FAULTED|invalid label|corrupted data/) usable = 1
+        }
+        END { exit usable ? 0 : 1 }
+    '
+}
+
+# A GPT that GEOM recovered from its SECONDARY table is residue, not data --
+# and FreeBSD is the only platform here that can see it.
+#
+# The provider asks Proxmox for a blank volume and gets one whose blocks were
+# recycled from a destroyed session's pool: the primary GPT is gone, the backup
+# in the final sector survives, GEOM falls back to it and reports the disk as
+# partitioned. So `gpart show` SUCCEEDS, this rule refused the only disk the
+# provider attached, candidates came back empty, and firstboot died with "no
+# unused disk" on a machine whose disk was in fact blank.
+#
+# lsblk reads the primary only, so the same volume looks empty on Linux:
+# selection accepts it, clear_residue zeroes both copies, and zpool create
+# succeeds. The cleaner written for exactly this residue therefore never ran on
+# the one platform able to detect it. This brings the two to the same verdict
+# for the same disk.
+#
+# MEASURED on a 64G session volume, not reasoned: "GPT (64G) [CORRUPT]" with an
+# apple-zfs partition and ZFS's 8M reserved partition beside it, the first MiB
+# entirely zero, the kernel logging "the primary GPT table is corrupt or
+# invalid ... using the secondary instead", and `zpool import` finding the dead
+# pool UNAVAIL on an invalid label.
+#
+# A table GEOM reads from its PRIMARY still refuses the disk, unchanged, and so
+# does a filesystem, a mount, pool membership, and zpool create's own veto.
 disk_free_freebsd() {
-    if gpart show "$1" >/dev/null 2>&1; then
-        return 1                                  # has a partition table
+    # The STATUS answers "is there a table", exactly as before, so a disk gpart
+    # refuses outright is still refused on the old rule. The OUTPUT answers the
+    # new question -- whether GEOM trusts the table it found -- because the exit
+    # status cannot distinguish one read from the primary from one recovered off
+    # the secondary, and those mean opposite things here.
+    if free_table=$(gpart show -p "$1" 2>/dev/null); then
+        case "${free_table}" in
+            *'[CORRUPT]'*)
+                # Residue, unless zfs still has a use for it.
+                if importable_from "$1"; then
+                    return 1
+                fi ;;
+            *)
+                return 1                          # a table GEOM trusts
+                ;;
+        esac
     fi
+
     if fstyp "/dev/$1" >/dev/null 2>&1; then
         return 1                                  # has a filesystem on it
     fi
