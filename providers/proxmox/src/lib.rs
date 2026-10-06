@@ -936,12 +936,83 @@ impl Provider for Proxmox {
             }
         }
 
+        self.diagnose_agent_right(guests, &mut |l, h, d| push(l, h, d));
         self.diagnose_tls(&mut |l, h, d| push(l, h, d));
         out
     }
 }
 
 impl Proxmox {
+    /// Whether this credential may read a guest agent.
+    ///
+    /// `doctor` checked that the token AUTHENTICATES and never that it is
+    /// PERMITTED, so a token denied VM.GuestAgent.Audit produced a clean
+    /// report while every `up` was doomed: the agent route is where reaper
+    /// learns a session's address and there is no second source.
+    ///
+    /// ASKED OF A TEMPLATE, so nothing is created and nothing is started. On
+    /// this route the ACL check precedes the existence-and-state check, which
+    /// is usually a trap and is the measurement here: a credential that MAY
+    /// ask about a machine that is not running is told "VM <id> is not
+    /// running", and one that may not is told 403. That difference separates
+    /// "not allowed to ask" from "nothing to report", which is the same pair
+    /// `address` has to tell apart at runtime.
+    fn diagnose_agent_right(
+        &self,
+        guests: &[RegisteredGuest],
+        push: &mut dyn FnMut(&str, Health, String),
+    ) {
+        let Some(id) = guests
+            .iter()
+            .find_map(|g| self.config.ids.check(&MachineRef::new(&g.template)).ok())
+        else {
+            push(
+                "guest agent",
+                Health::Warn,
+                "no usable template to ask, so it is unknown whether this credential may read a guest agent -- the right every session's address depends on".to_string(),
+            );
+            return;
+        };
+
+        let path = format!(
+            "/nodes/{}/qemu/{id}/agent/network-get-interfaces",
+            self.node()
+        );
+        match self.client.get(&path) {
+            Err(ProviderError::Unauthorized(m)) => push(
+                "guest agent",
+                Health::Fail,
+                format!(
+                    "this credential is denied the guest agent on template {id}: {m}. reaper learns a session's address from that route and nowhere else, so `up` will make a machine and then fail to reach it every time. Grant VM.GuestAgent.Audit on {}",
+                    self.config.pool
+                ),
+            ),
+            // A state, not a refusal: being told the machine is not running
+            // is proof the question was allowed.
+            Err(ProviderError::Api { ref message, .. })
+                if message.contains("not running") || message.contains("guest agent") =>
+            {
+                push(
+                    "guest agent",
+                    Health::Ok,
+                    format!("this credential may read the guest agent (template {id} answered about its state)"),
+                )
+            }
+            Ok(_) => push(
+                "guest agent",
+                Health::Ok,
+                format!("this credential may read the guest agent (template {id} answered)"),
+            ),
+            // Anything else is not evidence either way, and saying "ok" here
+            // would be the very thing this check exists to stop.
+            Err(e) => push(
+                "guest agent",
+                Health::Warn,
+                format!("could not tell whether this credential may read the guest agent: {e}"),
+            ),
+        }
+    }
+
     fn diagnose_tls(&self, push: &mut dyn FnMut(&str, Health, String)) {
         match &self.config.tls {
             crate::config::Tls::Insecure => push("tls", Health::Warn,

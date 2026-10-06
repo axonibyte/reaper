@@ -64,6 +64,14 @@ pub struct State {
     pub unauthorized: bool,
     pub agent_interfaces: Option<Value>,
     pub agent_unavailable: bool,
+    /// The agent route answers 403 while every other route works.
+    ///
+    /// Narrower than `unauthorized` on purpose, and the difference is the
+    /// whole point: a pool-scoped token that authenticates fine can still be
+    /// denied VM.GuestAgent.Audit, and the agent route is the only way reaper
+    /// learns an address. A global 403 cannot model that -- it fails at
+    /// /version, long before anything interesting.
+    pub agent_forbidden: bool,
     /// Free space every storage reports. Generous by default, so only the tests
     /// that care about the floor have to arrange anything; zero means the
     /// storage refuses to answer at all.
@@ -276,6 +284,11 @@ task_timeout = "5s"
     }
 
     /// Answer the cluster listing with a null rather than a list of machines.
+    /// Deny VM.GuestAgent.Audit while leaving every other route working.
+    pub fn forbid_agent(&self, forbidden: bool) {
+        self.with_state(|s| s.agent_forbidden = forbidden);
+    }
+
     pub fn listing_unreadable(&self, broken: bool) {
         self.with_state(|s| s.listing_unreadable = broken);
     }
@@ -634,6 +647,14 @@ fn route(s: &mut State, method: &str, path: &str, body: &str) -> (u16, Value) {
             // as status/current below. The permission text is all a caller
             // gets, and it reads like the wrong problem entirely.
             if lookup(s, id).is_none() {
+                return (
+                    403,
+                    json!({"message": format!("Permission check failed (/vms/{id}, VM.GuestAgent.Audit)")}),
+                );
+            }
+            // The machine exists and the credential is good; this one right
+            // is missing. Same wording the real API uses.
+            if s.agent_forbidden {
                 return (
                     403,
                     json!({"message": format!("Permission check failed (/vms/{id}, VM.GuestAgent.Audit)")}),

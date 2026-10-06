@@ -1942,6 +1942,75 @@ fn an_up_nobody_answers_leaves_an_inspectable_tagged_session() {
 }
 
 #[test]
+fn doctor_says_the_guest_agent_right_is_held_when_it_is() {
+    // The other arm. A check that reported Fail whichever way the right went
+    // would pass the test above and be worthless, and the healthy answer here
+    // arrives as an ERROR -- "VM <id> is not running", because a template is
+    // not running -- so the Ok path is the one most likely to be written
+    // wrong.
+    let h = Harness::new("doctoragentok");
+    let out = h.run(&["doctor"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert!(
+        said.contains("may read the guest agent"),
+        "the right is held and doctor should say so: {said}"
+    );
+    assert!(
+        !said.contains("denied the guest agent"),
+        "and must not report it denied: {said}"
+    );
+}
+
+#[test]
+fn doctor_does_not_report_ok_for_a_token_denied_the_guest_agent() {
+    let h = Harness::new("doctoragentperm");
+    h.hypervisor.forbid_agent(true);
+
+    let out = h.run(&["doctor"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Asserted as a FAILURE, not merely as a mention. "guest agent" appears
+    // in this check's Warn text too, so a substring match would pass a check
+    // that had quietly degraded from Fail to "could not tell" -- which is the
+    // same shape as the defect: a report that says something without saying
+    // anything is wrong.
+    assert!(
+        said.contains("denied the guest agent"),
+        "doctor must not pass a credential denied the one route an address \
+         comes from -- it checks that the token AUTHENTICATES, never that it \
+         is PERMITTED:\n{said}"
+    );
+    assert!(
+        said.contains("VM.GuestAgent.Audit"),
+        "name the right an operator has to grant: {said}"
+    );
+    assert!(
+        !said.contains("0 failed"),
+        "and it must count as a failure, not a warning: {said}"
+    );
+    assert!(!out.status.success(), "so doctor exits non-zero: {said}");
+}
+
+#[test]
+fn up_fails_loudly_when_the_token_may_not_read_the_guest_agent() {
+    let h = Harness::new("agentforbidden");
+    // The credential authenticates and every other route works; this one
+    // right is missing. The agent route is the only way reaper learns an
+    // address, so the session can never become usable.
+    h.hypervisor.forbid_agent(true);
+
+    let err = h.fails(&["up"]);
+    assert!(
+        err.contains("VM.GuestAgent.Audit"),
+        "name the right that is missing, because the text is all an operator gets: {err}"
+    );
+}
+
+#[test]
 fn down_refuses_a_machine_the_pool_has_given_to_something_else() {
     let h = Harness::new("downrecycled");
     h.ok(&["up"]);
