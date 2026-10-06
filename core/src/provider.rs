@@ -200,6 +200,20 @@ pub trait Provider {
     /// transform is the provider's and nothing outside it should know the
     /// shape. The default implementation declines to answer rather than
     /// vouching for a machine it never looked at.
+    /// `bears_name_of`'s question, asked against a summary the caller ALREADY
+    /// HOLDS.
+    ///
+    /// Same three-valued contract and the same one-directional soundness. This
+    /// exists because `list` must reconcile EVERY session, and routing each one
+    /// through `bears_name_of` would re-fetch the listing per record -- so the
+    /// table that is supposed to warn about a reused identifier would cost N
+    /// round trips to build, and the cost would be an argument for not building
+    /// it. One listing, N comparisons.
+    fn summary_bears_name_of(&self, summary: &MachineSummary, session: &str) -> Option<bool> {
+        let _ = (summary, session);
+        None
+    }
+
     fn bears_name_of(&self, machine: &MachineRef, session: &str) -> Result<Option<bool>> {
         let _ = (machine, session);
         Ok(None)

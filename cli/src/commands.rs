@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use reaper_core::config::Config;
-use reaper_core::provider::{CreateRequest, MachineRef, Provider};
+use reaper_core::provider::{CreateRequest, MachineRef, MachineSummary, Provider};
 use reaper_core::session::{Session, Store};
 use reaper_core::sync;
 use reaper_core::transport::{Ssh, Transport};
@@ -618,9 +618,16 @@ fn start_heartbeat(session: &str) -> Result<Option<u32>> {
 enum ClusterView {
     /// The provider answered. Its `list` is every machine it is responsible
     /// for, so a session missing from it is really missing.
+    ///
+    /// The SUMMARIES are kept rather than the refs alone, because an
+    /// identifier that is present says nothing about whose it is: the pool
+    /// reuses ids, so a record can name a machine that now belongs to another
+    /// session. Presence answered "ok" for exactly that case and the table
+    /// read as reassurance while `down` on that row would have destroyed
+    /// somebody else's machine.
     Answered {
         provider: String,
-        machines: Vec<MachineRef>,
+        machines: Vec<MachineSummary>,
     },
     /// No answer -- unconfigured, unreachable, or refused.
     ///
@@ -632,28 +639,49 @@ enum ClusterView {
     Silent(String),
 }
 
-fn cluster_view() -> ClusterView {
+/// The cluster's view AND the provider that gave it.
+///
+/// The provider comes back because the verdict needs it to compare a name, and
+/// the first version of this dropped it -- which is why the column could only
+/// ask whether an identifier was present.
+fn cluster_view() -> (ClusterView, Option<Box<dyn Provider>>) {
     let cfg = match load_config() {
         Ok(c) => c,
         // `list` answered from the store alone for as long as it existed, so a
         // box with records and no usable configuration still gets its table.
-        Err(e) => return ClusterView::Silent(format!("no usable configuration ({e})")),
+        Err(e) => return (ClusterView::Silent(format!("no usable configuration ({e})")), None),
     };
     let provider = match provider_for(&cfg) {
         Ok(p) => p,
-        Err(e) => return ClusterView::Silent(format!("the provider could not be built ({e})")),
+        Err(e) => {
+            return (
+                ClusterView::Silent(format!("the provider could not be built ({e})")),
+                None,
+            )
+        }
     };
     match provider.list() {
-        Ok(machines) => ClusterView::Answered {
-            provider: provider.name().to_string(),
-            machines: machines.into_iter().map(|m| m.machine).collect(),
-        },
-        Err(e) => ClusterView::Silent(format!("{} did not answer ({e})", provider.name())),
+        Ok(machines) => (
+            ClusterView::Answered {
+                provider: provider.name().to_string(),
+                machines,
+            },
+            Some(provider),
+        ),
+        Err(e) => {
+            let why = format!("{} did not answer ({e})", provider.name());
+            (ClusterView::Silent(why), Some(provider))
+        }
     }
 }
 
 /// The CLUSTER column for one session.
-fn cluster_verdict(s: &Session, view: &ClusterView) -> &'static str {
+///
+/// Four answers and not two, because "the id is present" and "the machine is
+/// still this session's" are different questions and the pool recycles ids.
+/// REUSED is the one that matters: it names a record whose `down` would
+/// destroy a live session belonging to somebody else.
+fn cluster_verdict(s: &Session, view: &ClusterView, provider_impl: &dyn Provider) -> &'static str {
     let (provider, machines) = match view {
         ClusterView::Silent(_) => return "-",
         ClusterView::Answered { provider, machines } => (provider, machines),
@@ -667,10 +695,18 @@ fn cluster_verdict(s: &Session, view: &ClusterView) -> &'static str {
     if recorded != provider.as_str() {
         return "elsewhere";
     }
-    if machines.contains(&s.machine) {
-        "ok"
-    } else {
-        "GONE"
+    let Some(found) = machines.iter().find(|m| m.machine == s.machine) else {
+        return "GONE";
+    };
+    // Asked of the PROVIDER, which owns the name transform, and answered
+    // against the listing already in hand.
+    match provider_impl.summary_bears_name_of(found, &s.name) {
+        Some(true) => "ok",
+        // The destroy hazard, and the only verdict here that is load-bearing:
+        // the id is live and belongs to something else.
+        Some(false) => "REUSED",
+        // Present, and this provider cannot say whose. Not "ok".
+        None => "?",
     }
 }
 
@@ -688,14 +724,22 @@ pub fn list() -> Result<()> {
     // apart, each given a true answer about a different object; a `down` aimed
     // at the stale one is destructive against a machine the pool has since
     // handed to somebody else.
-    let view = cluster_view();
+    let (view, provider) = cluster_view();
 
     let now = SystemTime::now();
     say!(
         "{:<24} {:<16} {:<8} {:<10} {:<16} {:<12} {}",
         "SESSION", "GUEST", "AGE", "EXPIRES", "ADDRESS", "HEARTBEAT", "CLUSTER"
     );
+    let mut reused: Vec<String> = Vec::new();
     for s in sessions {
+        let verdict = match &provider {
+            Some(p) => cluster_verdict(&s, &view, p.as_ref()),
+            None => "-",
+        };
+        if verdict == "REUSED" {
+            reused.push(s.name.clone());
+        }
         let expires = match s.remaining(now) {
             Some(d) => duration::format_rough(d),
             // Not a cosmetic state: the sweeper may take this machine at any
@@ -722,7 +766,20 @@ pub fn list() -> Result<()> {
             expires,
             s.address.map(|a| a.to_string()).unwrap_or_else(|| "-".into()),
             heartbeat,
-            cluster_verdict(&s, &view)
+            verdict
+        );
+    }
+    // Said LOUDLY and after the table, because this is the row an operator is
+    // most likely to act on and the action destroys somebody else's machine.
+    // The table alone was not enough: a reader who sees a stale, expired record
+    // reaches for `down`, which is exactly what the pool has made unsafe.
+    if !reused.is_empty() {
+        warn_line!(
+            "{} record(s) name a machine the pool has since given to something else: {}. \
+             `reaper down` on those would destroy another session's machine -- this box's \
+             record is stale, not the machine. Reconcile before acting on them",
+            reused.len(),
+            reused.join(", ")
         );
     }
     if let ClusterView::Silent(why) = &view {

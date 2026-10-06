@@ -685,14 +685,19 @@ impl Provider for Proxmox {
     /// and Pool.Audit grants no site is required to have given. The node's
     /// health is evidenced through the template checks, whose requests all
     /// cross it.
+    fn summary_bears_name_of(&self, summary: &MachineSummary, session: &str) -> Option<bool> {
+        Some(summary.name == sanitize_name(session))
+    }
+
     fn bears_name_of(&self, machine: &MachineRef, session: &str) -> Result<Option<bool>> {
         // Read from the listing rather than the machine's own config: the
         // listing is what every other reconciliation here uses, so one answer
-        // cannot disagree with another about whether a machine exists.
-        let want = sanitize_name(session);
+        // cannot disagree with another about whether a machine exists. The
+        // comparison itself is delegated, so `down` and `list` cannot drift
+        // apart about what counts as the same machine.
         for m in self.list()? {
             if &m.machine == machine {
-                return Ok(Some(m.name == want));
+                return Ok(self.summary_bears_name_of(&m, session));
             }
         }
         // Absent, which is not a mismatch. `destroy` is already idempotent

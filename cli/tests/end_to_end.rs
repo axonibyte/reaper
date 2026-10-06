@@ -1878,6 +1878,62 @@ fn list_says_gone_for_a_session_the_cluster_no_longer_has() {
 }
 
 #[test]
+fn list_says_reused_not_ok_when_the_pool_has_given_the_id_to_something_else() {
+    let h = Harness::new("listreused");
+    h.ok(&["up"]);
+    let m = h.hypervisor.machine_named("a-project").expect("machine");
+    let id: u32 = m.parse().expect("an id this provider issued");
+
+    // THE INCIDENT, not a hypothetical. A record expired, the sweeper took its
+    // machine, the pool handed the same id to another session, and the stale
+    // record still named it. Presence answered "ok" for exactly this, the
+    // table read as reassurance, and `down` on that row destroys the other
+    // session's live machine.
+    h.hypervisor.with_state(|s| {
+        s.vms
+            .get_mut(&id)
+            .expect("the machine we just created")
+            .name = "someone-elses".to_string();
+    });
+
+    let listed = h.ok(&["list"]);
+    assert!(
+        listed.contains("REUSED"),
+        "the id is live and is NOT this session's; 'ok' here is the defect: {listed}"
+    );
+    assert!(
+        !listed.contains("a-project          a-guest") || !listed.contains(" ok"),
+        "it must not also read ok: {listed}"
+    );
+}
+
+#[test]
+fn list_warns_after_the_table_when_a_record_names_a_reused_machine() {
+    // The column is not enough on its own: the row an operator acts on is the
+    // stale one, and the action is the destructive one. So it is said again,
+    // loudly, naming the session.
+    let h = Harness::new("listreusedwarn");
+    h.ok(&["up"]);
+    let m = h.hypervisor.machine_named("a-project").expect("machine");
+    let id: u32 = m.parse().expect("an id");
+    h.hypervisor.with_state(|s| {
+        s.vms.get_mut(&id).expect("vm").name = "someone-elses".to_string();
+    });
+
+    let out = h.run(&["list"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("would destroy another session's machine"),
+        "name the hazard, not just the state: {said}"
+    );
+    assert!(said.contains("a-project"), "and name the record: {said}");
+}
+
+#[test]
 fn a_cluster_that_cannot_be_read_is_not_a_cluster_with_nothing_in_it() {
     let h = Harness::new("listsilent");
     h.ok(&["up"]);
