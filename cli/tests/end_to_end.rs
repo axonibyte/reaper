@@ -44,6 +44,13 @@ impl Harness {
 # on demand. It deliberately does not run the runner -- the runner has its own
 # suite, and re-testing it through here would only make failures harder to read.
 here=$(dirname "$0")
+# A ONE-SHOT delay, consumed on use, so a test can make a single command outlive
+# the renewal interval without slowing every other invocation in the suite.
+if [ -f "${here}/slow" ]; then
+    secs=$(cat "${here}/slow")
+    rm -f "${here}/slow"
+    sleep "${secs}"
+fi
 printf '%s
 ' "$*" >> "${here}/ssh.log"
 for a in "$@"; do
@@ -426,76 +433,6 @@ fn a_missing_manifest_says_what_to_do_about_it() {
     std::fs::remove_file(h.dir.join(".reaper.toml")).unwrap();
     let err = h.fails(&["up"]);
     assert!(err.contains("docs/tenants.md"), "{err}");
-}
-
-/// Is this pid a process that is still *running*?
-///
-/// Deliberately not `kill(pid, 0)` alone. That answers "is there an entry in
-/// the process table", and a process that has exited keeps one until its
-/// parent reaps it -- so it says "yes" for a corpse. The heartbeat is orphaned
-/// by design, which means the parent that has to reap it is whatever init the
-/// machine has: a workstation's does it the instant the process dies, a
-/// container's pid 1 is often a shell that never does it at all.
-///
-/// These assertions are about whether `down` stopped the process. Whether
-/// somebody else's init has got around to tidying up afterwards is a different
-/// question, and one this test has no business failing over -- it did, in CI,
-/// for months after passing everywhere else. `ps` is the same instrument
-/// cli/src/proc.rs uses, chosen there for the same portability reason.
-///
-/// Note what this still catches: a heartbeat `down` failed to stop is running,
-/// not defunct, so the assertion below is no weaker than it was.
-fn still_running(pid: u32) -> bool {
-    // Safety: kill with signal 0 delivers nothing and only inspects.
-    if unsafe { libc::kill(pid as i32, 0) } != 0 {
-        return false;
-    }
-    let out = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "state="])
-        .output()
-        .expect("ps");
-    out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().starts_with('Z')
-}
-
-#[test]
-fn a_heartbeat_is_started_and_stopped_with_the_session() {
-    let h = Harness::new("heartbeat");
-    h.ok(&["up"]);
-
-    let listed = h.ok(&["list"]);
-    // The HEARTBEAT column by POSITION, not `last()`. Reading the last field
-    // was wrong before CLUSTER was ever added: a stopped heartbeat renders as
-    // `<pid> DEAD`, so `last()` returns "DEAD" and the parse fails -- this
-    // only ever passed because the heartbeat here is alive. Columns are
-    // name, guest, age, expires, address, heartbeat.
-    let pid: u32 = listed
-        .lines()
-        .find(|l| l.starts_with("a-project"))
-        .and_then(|l| l.split_whitespace().nth(5))
-        .and_then(|p| p.parse().ok())
-        .unwrap_or_else(|| panic!("no heartbeat pid in:\n{listed}"));
-    assert!(still_running(pid), "the heartbeat should be running");
-
-    // It must be its own session leader, or it dies with the terminal that
-    // started it -- which offline testing cannot notice, because nothing here
-    // signals the process group. Found live: the heartbeat was gone the moment
-    // `up` returned.
-    let sid = std::process::Command::new("ps")
-        .args(["-o", "sid=", "-p", &pid.to_string()])
-        .output()
-        .expect("ps");
-    let sid: u32 = String::from_utf8_lossy(&sid.stdout).trim().parse().unwrap_or(0);
-    assert_eq!(
-        sid, pid,
-        "the heartbeat must be its own session leader (sid {sid} != pid {pid})"
-    );
-
-    h.ok(&["down"]);
-    std::thread::sleep(Duration::from_millis(200));
-    assert!(
-        !still_running(pid),
-        "down should have stopped the heartbeat"
-    );
 }
 
 #[test]
@@ -1622,11 +1559,95 @@ fn renew_with_an_explicit_ttl_uses_it() {
     assert!(out.contains("expires in 30m"), "{out}");
 }
 
+impl Harness {
+    /// The `expires_at` this box's record carries, read from the store rather
+    /// than from `list`'s rendering -- the question is what was WRITTEN.
+    fn expires_at(&self, session: &str) -> u64 {
+        let raw = std::fs::read_to_string(self.dir.join("sessions.json")).expect("store");
+        // Deliberately crude: the suite has no json dependency, and the field
+        // is unambiguous in a file this shape.
+        let key = format!("\"{session}\"");
+        let at = raw.find(&key).unwrap_or_else(|| panic!("no record {session} in:\n{raw}"));
+        let tail = &raw[at..];
+        let f = tail.find("\"expires_at\"").expect("expires_at");
+        let rest = &tail[f + "\"expires_at\"".len()..];
+        let digits: String = rest
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits.parse().expect("an epoch")
+    }
+}
+
 #[test]
-fn list_is_honest_about_expiry_and_dead_heartbeats() {
-    // EXPIRED is not cosmetic -- the sweeper may take the machine at any
-    // moment -- and a DEAD heartbeat means the countdown has stopped moving.
-    // Both renderings existed with no test that would notice them lying.
+fn work_in_progress_renews_the_session_and_idleness_does_not() {
+    // The whole of the change, in one pair. Renewal belongs to work: it moves
+    // the expiry while a command runs and does not exist between commands.
+    // The daemon this replaces renewed regardless of whether anybody still
+    // wanted the machine, which is how a session reached 797 hours.
+    let h = Harness::new("renewduringwork");
+    h.amend_config("heartbeat_interval", "1s");
+    h.ok(&["up"]);
+
+    // IDLE FIRST, so the pair is a comparison and not an assertion about one
+    // number: a command that touches no guest must not move the expiry.
+    let before_idle = h.expires_at("a-project");
+    h.ok(&["list"]);
+    h.ok(&["list"]);
+    assert_eq!(
+        h.expires_at("a-project"),
+        before_idle,
+        "nothing may renew between commands -- that is the dead-man's switch"
+    );
+
+    // NOW WORK, made to outlive the 1s interval by a one-shot delay.
+    write(&h.dir.join("slow"), "3", None);
+    let before_work = h.expires_at("a-project");
+    h.ok(&["sync"]);
+    let after_work = h.expires_at("a-project");
+    assert!(
+        after_work > before_work,
+        "work in progress must renew: {before_work} -> {after_work}"
+    );
+}
+
+#[test]
+fn up_leaves_nothing_renewing_behind_it() {
+    // `up` used to detach a second reaper process that renewed until `down`.
+    // It leaves none now, and says so, because the previous behaviour was
+    // announced here and its absence would otherwise have to be inferred.
+    let h = Harness::new("upnodaemon");
+    let out = h.ok(&["up"]);
+    assert!(
+        out.contains("nothing renews between commands"),
+        "say what no longer happens: {out}"
+    );
+    assert!(
+        !out.contains("renewing in the background"),
+        "and do not announce a process that is not there: {out}"
+    );
+
+    // The cheap discriminator against REINTRODUCING a daemon: one would record
+    // its pid here. A thread cannot, because it does not survive the command
+    // that owns it -- so a pid in this record means a detached process exists
+    // again. This is the arm a leaked in-process renewer could never trip,
+    // which is why the assertion is about the RECORD and not about timing.
+    let raw = std::fs::read_to_string(h.dir.join("sessions.json")).expect("store");
+    assert!(
+        raw.contains("\"heartbeat_pid\": null") || !raw.contains("heartbeat_pid"),
+        "up recorded a renewer pid, so something detached is running again:\n{raw}"
+    );
+}
+
+#[test]
+fn list_is_honest_about_an_expired_record() {
+    // EXPIRED is not cosmetic: the sweeper may take the machine at any moment.
+    //
+    // This once asserted a DEAD heartbeat beside it. There is no longer a
+    // persistent heartbeat to be dead -- renewal lives for the length of a
+    // command -- so a decaying expiry is the DESIGN and not a fault, and the
+    // only honest thing left to check here is the expiry itself.
     let h = Harness::new("listhonest");
     write(
         &h.dir.join("sessions.json"),
@@ -1653,27 +1674,9 @@ fn list_is_honest_about_expiry_and_dead_heartbeats() {
     );
     let out = h.ok(&["list"]);
     assert!(out.contains("EXPIRED"), "{out}");
-    assert!(out.contains("DEAD"), "{out}");
-}
-
-#[test]
-fn a_heartbeat_for_a_forgotten_session_exits_quietly() {
-    // `down` removed the session; the heartbeat's next tick finds nothing.
-    // That is the intended end of its life, not an error worth a message.
-    let h = Harness::new("hbgone");
-    let out = h.run(&["heartbeat", "--session", "no-such-session"]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    // The insecure-TLS warning is loud on every invocation by design;
-    // nothing else may be said.
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let unexpected: Vec<&str> = stderr
-        .lines()
-        .filter(|l| !l.contains("TLS certificate verification") && !l.trim().is_empty())
-        .collect();
     assert!(
-        out.stdout.is_empty() && unexpected.is_empty(),
-        "nothing to renew and nothing to report: {} / {unexpected:?}",
-        String::from_utf8_lossy(&out.stdout),
+        !out.contains("HEARTBEAT"),
+        "the column reported a daemon that no longer exists: {out}"
     );
 }
 
@@ -1787,59 +1790,6 @@ fn run_survives_a_session_that_cannot_be_reached() {
         stderr.contains("a-project-a-guest"),
         "the unreachable one is named: {stderr}"
     );
-}
-
-#[test]
-fn a_heartbeat_whose_machine_is_gone_ends_itself() {
-    // set_expiry now says NotFound for a machine the cluster no longer
-    // lists. A heartbeat hearing that has nothing left to renew, ever --
-    // looping forever warning every interval is a leaked process wearing a
-    // log line. It must end, and say why.
-    let h = Harness::new("hbmachinegone");
-    h.amend_config("heartbeat_interval", "1s");
-    h.amend_config("default_ttl", "10s");
-    h.ok(&["up"]);
-    let machine = h.hypervisor.machine_named("a-project").expect("machine");
-    // Stop the up-started heartbeat before the scenario, so it does not race.
-    let stored = std::fs::read_to_string(h.dir.join("sessions.json")).unwrap();
-    if let Some(pid) = stored
-        .split("\"heartbeat_pid\": ")
-        .nth(1)
-        .and_then(|r| r.split(&[',', '\n'][..]).next())
-        .and_then(|p| p.trim().parse::<i32>().ok())
-    {
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-    }
-    h.hypervisor.collect(&machine);
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_reaper"))
-        .args(["heartbeat", "--session", "a-project"])
-        .current_dir(&h.dir)
-        .env("REAPER_CONFIG", h.dir.join("config.toml"))
-        .env("REAPER_STATE", h.dir.join("sessions.json"))
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn heartbeat");
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let status = loop {
-        if let Some(st) = child.try_wait().expect("wait") {
-            break Some(st);
-        }
-        if std::time::Instant::now() > deadline {
-            break None;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    };
-    let Some(status) = status else {
-        child.kill().ok();
-        panic!("the heartbeat is still running against a machine that is gone");
-    };
-    assert!(status.success(), "ending is the correct outcome, not a crash");
-    let mut err = String::new();
-    use std::io::Read as _;
-    child.stderr.take().unwrap().read_to_string(&mut err).ok();
-    assert!(err.contains("gone"), "say why it ended: {err}");
 }
 
 #[test]
@@ -2261,51 +2211,6 @@ datasets = ["state"]
 }
 
 #[test]
-fn list_does_not_vouch_for_a_recycled_pid() {
-    // `down` already refuses to signal a pid that is no longer the
-    // heartbeat; `list` was still showing the same pid as a live heartbeat.
-    // The column is the operator's dead-man's-switch indicator -- vouching
-    // for a stranger's process is the one lie it must not tell.
-    let h = Harness::new("recycledpid");
-    h.ok(&["up"]);
-    // Replace the recorded pid with this test's own: alive, and not a
-    // heartbeat. The REAL heartbeat is killed first -- once its pid leaves
-    // the record, nothing (not even the harness's closing down --all) can
-    // stop it, and it lingers until its next ten-minute tick. This suite's
-    // own residue count is what caught that.
-    let p = h.dir.join("sessions.json");
-    let stored = std::fs::read_to_string(&p).unwrap();
-    if let Some(pid) = stored
-        .split("\"heartbeat_pid\": ")
-        .nth(1)
-        .and_then(|r| r.split(&[',', '\n'][..]).next())
-        .and_then(|x| x.trim().parse::<i32>().ok())
-    {
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-    }
-    let re_stored = {
-        let pid = std::process::id();
-        let mut out = String::new();
-        for line in stored.lines() {
-            if line.trim_start().starts_with("\"heartbeat_pid\"") {
-                out.push_str(&format!("      \"heartbeat_pid\": {pid},\n"));
-            } else {
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-        out
-    };
-    std::fs::write(&p, re_stored).unwrap();
-
-    let out = h.ok(&["list"]);
-    assert!(
-        out.contains("DEAD"),
-        "an alive-but-foreign pid is a dead heartbeat, not a live one: {out}"
-    );
-}
-
-#[test]
 fn up_does_not_reuse_a_session_whose_machine_is_gone() {
     // The record said up; the sweeper had other information. "Reusing" a
     // machine that no longer exists hands the operator a session every verb
@@ -2576,26 +2481,6 @@ fn doctor_flags_a_record_whose_machine_is_gone() {
 }
 
 #[test]
-fn doctor_warns_about_a_dead_heartbeat_without_failing() {
-    let h = Harness::new("doctorhb");
-    h.ok(&["up"]);
-    let stored = std::fs::read_to_string(h.dir.join("sessions.json")).unwrap();
-    if let Some(pid) = stored
-        .split("\"heartbeat_pid\": ")
-        .nth(1)
-        .and_then(|r| r.split(&[',', '\n'][..]).next())
-        .and_then(|x| x.trim().parse::<i32>().ok())
-    {
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-    }
-    std::thread::sleep(Duration::from_millis(200));
-    let out = h.run(&["doctor"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "a dead heartbeat is a warning: {stdout}");
-    assert!(stdout.contains("heartbeat is dead"), "{stdout}");
-}
-
-#[test]
 fn doctor_fails_a_missing_transport_binary() {
     let h = Harness::new("doctorrsync");
     h.amend_config("rsync_command", "/nonexistent/reaper-doctor-rsync");
@@ -2698,88 +2583,6 @@ fn rewrite_session_field(h: &Harness, field: &str, value: u64) {
     std::fs::write(&p, out.join("\n")).unwrap();
 }
 
-#[test]
-fn a_healthy_heartbeat_with_a_silent_log_is_not_stalled() {
-    // The false positive from the field: expiry fresh, log mtime ancient --
-    // which is exactly what health looks like, because success says nothing.
-    let h = Harness::new("silentlog");
-    h.ok(&["up"]);
-    let log = h.dir.join("heartbeat-a-project.log");
-    assert!(log.exists(), "up starts the heartbeat, which owns a log");
-    // The heartbeat's startup takes seconds after `up` returns, and its one
-    // write -- the TLS warning -- lands in this log when it does, resetting
-    // any mtime a test set earlier. That lag is what made two prior attempts
-    // at this test vacuous, on two machines. Stage after the write; nothing
-    // writes again, because health is silent.
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    while std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0) == 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the heartbeat's startup write never landed"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    let f = std::fs::File::options().write(true).open(&log).unwrap();
-    f.set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
-        .unwrap();
-    drop(f);
-
-    let out = h.run(&["doctor"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{stdout}");
-    assert!(
-        !stdout.contains("renewal may not be happening"),
-        "a silent log is what health looks like: {stdout}"
-    );
-    assert!(stdout.contains("record, machine and heartbeat agree"), "{stdout}");
-}
-
-#[test]
-fn a_live_heartbeat_whose_expiry_decays_is_reported_stalled() {
-    // The true positive the old check meant to catch and could not: the
-    // process is alive, but the expiry has decayed far below what a renewing
-    // heartbeat would ever allow (ttl - 2 intervals).
-    let h = Harness::new("decayedexpiry");
-    h.ok(&["up"]);
-    // The REAL heartbeat cannot stay for this test: its first tick lands
-    // seconds after `up` returns (binary startup, store lock) and re-renews
-    // the record underneath any doctored expiry -- which is precisely how
-    // two earlier attempts at this regression test came to prove nothing.
-    // It is replaced by a decoy that is alive and carries "heartbeat" in its
-    // argv -- everything the strict pid judgement checks -- but can renew
-    // nothing.
-    let stored = std::fs::read_to_string(h.dir.join("sessions.json")).unwrap();
-    if let Some(pid) = stored
-        .split("\"heartbeat_pid\": ")
-        .nth(1)
-        .and_then(|r| r.split(&[',', '\n'][..]).next())
-        .and_then(|x| x.trim().parse::<i32>().ok())
-    {
-        unsafe { libc::kill(pid, libc::SIGKILL) };
-    }
-    let mut decoy = Command::new("sh")
-        .args(["-c", "sleep 60; exit 0", "reaper-test-heartbeat-decoy"])
-        .spawn()
-        .expect("spawn decoy");
-    rewrite_session_field(&h, "heartbeat_pid", u64::from(decoy.id()));
-    let soon = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 100; // 100s left of a 7200s ttl: far past the decay floor
-    rewrite_session_field(&h, "expires_at", soon);
-
-    let out = h.run(&["doctor"]);
-    decoy.kill().ok();
-    decoy.wait().ok();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "a decay is a warning, not a failure: {stdout}");
-    assert!(
-        stdout.contains("renewal may not be happening"),
-        "{stdout}"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Reports from tenants dogfooding reaper, 2026-08-16 to 2026-08-21.
 //
@@ -2851,33 +2654,6 @@ fn a_project_with_no_session_is_told_which_verb_makes_one() {
     let err = h.fails(&["test"]);
     assert!(err.contains("no sessions for"), "{err}");
     assert!(err.contains("reaper up"), "name the verb that makes one: {err}");
-}
-
-#[test]
-fn up_names_the_process_it_leaves_running() {
-    // `up` detaches a heartbeat that runs until `down`, and used to say
-    // nothing about it. `ps` after `up` returns then shows a live `reaper`,
-    // which reads as an `up` that never exited -- an afternoon lost waiting on
-    // it, and the session lost when the wrong process was finally killed.
-    let h = Harness::new("namesheartbeat");
-    let said = h.ok(&["up"]);
-    let pid: u32 = said
-        .lines()
-        .find(|l| l.contains("renewing in the background"))
-        .and_then(|l| l.split("pid ").nth(1))
-        .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
-        .and_then(|p| p.parse().ok())
-        .unwrap_or_else(|| panic!("up must name the process it leaves behind:\n{said}"));
-
-    assert!(
-        said.contains("`up` itself is finished"),
-        "and say that it is not `up`:\n{said}"
-    );
-    let listed = h.ok(&["list"]);
-    assert!(
-        listed.contains(&pid.to_string()),
-        "the pid named must be the one `list` shows as the heartbeat:\n{listed}"
-    );
 }
 
 #[test]

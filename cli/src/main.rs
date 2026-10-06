@@ -150,12 +150,6 @@ enum Command {
         manifest: Option<PathBuf>,
     },
 
-    /// Renew a session's expiry until it goes away. Started by `up`.
-    #[command(hide = true)]
-    Heartbeat {
-        #[arg(long)]
-        session: String,
-    },
 }
 
 fn main() -> ExitCode {
@@ -219,7 +213,6 @@ fn main() -> ExitCode {
             all,
             manifest,
         } => commands::down(session, all, manifest),
-        Command::Heartbeat { session } => commands::heartbeat(&session),
     };
 
     match outcome {

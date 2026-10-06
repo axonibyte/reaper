@@ -14,7 +14,6 @@ use reaper_core::transport::{Ssh, Transport};
 use reaper_core::{config, duration, job};
 use reaper_manifest::{Exec, Manifest};
 
-use crate::proc;
 
 pub type Error = Box<dyn std::error::Error>;
 type Result<T> = std::result::Result<T, Error>;
@@ -171,20 +170,10 @@ pub fn up(
                 )
                 .into());
             }
-            // Reusing a session whose heartbeat died (a reboot, a killed
-            // terminal) would hand the operator a machine on a fixed
-            // countdown; restart the renewal before calling it up.
-            if !existing.heartbeat_pid.map(proc::is_alive).unwrap_or(false) {
-                let pid = start_heartbeat(&name)?;
-                store.update(&name, |st| st.heartbeat_pid = pid)?;
-                match pid {
-                    Some(pid) => say!(
-                        "{name}: its heartbeat was dead; restarted as pid {pid}, which runs \
-                         until `reaper down`"
-                    ),
-                    None => say!("{name}: its heartbeat was dead; restarted"),
-                }
-            }
+            // Nothing to restart: renewal belongs to work in progress and no
+            // longer persists between commands, so a reused session simply
+            // carries the expiry it has until the next command renews it or
+            // `reaper renew` does.
             say!(
                 "{name}: already up on {address} since {} ago -- reusing it",
                 duration::format_rough(existing.age(SystemTime::now()))
@@ -280,33 +269,20 @@ pub fn up(
                 session.ready_at = Some(ready_at);
                 session.expires_at = ready_at + ttl;
                 store.put(session)?;
-                let mut renewer = None;
-                match start_heartbeat(&name) {
-                    Ok(pid) => {
-                        renewer = pid;
-                        store.update(&name, |st| st.heartbeat_pid = pid)?;
-                    }
-                    Err(e) => warn_line!(
-                        "{name}: could not start the renewal heartbeat: {e}. The session works but its expiry will not move; `reaper renew` extends it by hand"
-                    ),
-                }
 
                 say!(
                     "{name}: up at {address}, expires in {}",
                     duration::format(ttl)
                 );
-                // Named, because `up` leaves a second reaper process behind
-                // and nothing used to say so. It is detached into its own
-                // session so it survives the terminal, which means `ps` after
-                // `up` returns shows a live `reaper` -- and reading that as an
-                // `up` that never exited costs an afternoon, then costs the
-                // session too when the wrong process is killed.
-                if let Some(pid) = renewer {
-                    say!(
-                        "{name}: renewing in the background as pid {pid}. That process runs \
-                         until `reaper down`; `up` itself is finished here"
-                    );
-                }
+                // `up` now leaves NO process behind, which is the whole of the
+                // change: the expiry moves while a command is working and not
+                // otherwise. Said plainly, because the previous behaviour was
+                // announced here and its absence would otherwise be inferred.
+                say!(
+                    "{name}: nothing renews between commands -- this expires in {} unless \
+                     work or `reaper renew` moves it",
+                    duration::format(ttl)
+                );
             }
             None => {
                 // The machine exists and carries its grace expiry, so nothing
@@ -567,47 +543,119 @@ fn prepare(session: &str, ssh: &Ssh) -> Result<()> {
     Ok(())
 }
 
-fn start_heartbeat(session: &str) -> Result<Option<u32>> {
-    let exe = std::env::current_exe()?;
-    let log_path = Store::open()
-        .path()
-        .with_file_name(format!("heartbeat-{session}.log"));
-    if let Some(dir) = log_path.parent() {
-        std::fs::create_dir_all(dir)?;
+/// Renews one session's expiry for exactly as long as a piece of work is
+/// running, and stops when that work returns.
+///
+/// A THREAD, and not the detached process this replaces. That daemon was
+/// deliberately detached so it would outlive the terminal, and that is how a
+/// session came to refresh ITSELF: nothing tied the renewal to anybody still
+/// wanting the machine, so a session was renewed for 797 hours after its owner
+/// walked away. A thread cannot outlive its process, so the renewal cannot
+/// outlive the work it attests -- and nothing records a pid, which REMOVES the
+/// recycled-pid question rather than guarding against it.
+///
+/// Between commands nothing renews, which is the point: an idle session spends
+/// the TTL it already has and the sweeper collects it. `reaper renew` is the
+/// local agent saying otherwise, out loud.
+struct Renewing {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Renewing {
+    fn during(cfg: &Config, session: &str) -> Renewing {
+        use std::sync::atomic::Ordering;
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let cfg = cfg.clone();
+        let name = session.to_string();
+        let interval = cfg.session.heartbeat_interval;
+
+        let thread = std::thread::Builder::new()
+            .name(format!("renew-{name}"))
+            .spawn(move || {
+                // Its OWN provider, built here: `dyn Provider` is not Send, and
+                // demanding that of every implementation so one could be shared
+                // across this boundary would be the tail wagging the dog.
+                let provider = match provider_for(&cfg) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn_line!(
+                            "{name}: not renewing while this runs ({e}); the session keeps \
+                             the expiry it already has"
+                        );
+                        return;
+                    }
+                };
+                let store = Store::open();
+                let mut said: Option<String> = None;
+
+                loop {
+                    // Polled rather than slept through, so the end of the work
+                    // is not waited on for a whole interval.
+                    let step = std::time::Duration::from_millis(200);
+                    let mut waited = std::time::Duration::ZERO;
+                    while waited < interval {
+                        if flag.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(step);
+                        waited += step;
+                    }
+                    if flag.load(Ordering::Relaxed) {
+                        return;
+                    }
+
+                    // Re-read each time: `down` may have removed the record,
+                    // and a TTL changed by `renew` mid-work is the operator's
+                    // word and not ours to override.
+                    let Ok(Some(s)) = store.get(&name) else {
+                        return;
+                    };
+                    let expires_at = SystemTime::now() + s.ttl;
+                    match provider.set_expiry(&s.machine, expires_at) {
+                        Ok(()) => {
+                            let _ = store.update(&name, |st| st.expires_at = expires_at);
+                        }
+                        // Gone is not a blip and nothing here brings it back.
+                        Err(reaper_core::ProviderError::NotFound(_)) => {
+                            warn_line!(
+                                "{name}: its machine is gone, so nothing is being renewed \
+                                 while this work runs"
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            // Said once per distinct reason. A single failed
+                            // renewal is survivable precisely because the
+                            // interval fits several times into the TTL, which
+                            // is what the configuration insists on.
+                            let note = e.to_string();
+                            if said.as_deref() != Some(&note) {
+                                warn_line!("{name}: could not renew ({note}); still working");
+                                said = Some(note);
+                            }
+                        }
+                    }
+                }
+            })
+            .ok();
+
+        Renewing { stop, thread }
     }
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
+}
 
-    let mut cmd = std::process::Command::new(exe);
-    cmd.args(["heartbeat", "--session", session])
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log);
-
-    // Detach into its own session, so it outlives the terminal that started
-    // it. Without this the heartbeat stays in the parent's process group and
-    // dies when that group is signalled -- closing the shell after `up` would
-    // silently stop renewing, and the machine would be collected hours later
-    // while someone was still working on it. The dead-man's switch is meant to
-    // fire when the operator vanishes, not when their terminal does.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            // Safety: setsid in the child between fork and exec is
-            // async-signal-safe. It fails only if we are already a group
-            // leader, which a freshly forked child is not.
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+impl Drop for Renewing {
+    /// Stops the renewal and WAITS for it, so no renewal lands after the work
+    /// that justified it has returned.
+    fn drop(&mut self) {
+        self.stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
     }
-
-    let child = cmd.spawn()?;
-
-    Ok(Some(child.id()))
 }
 
 /// What the cluster says about the machines this box has records for.
@@ -728,8 +776,8 @@ pub fn list() -> Result<()> {
 
     let now = SystemTime::now();
     say!(
-        "{:<24} {:<16} {:<8} {:<10} {:<16} {:<12} {}",
-        "SESSION", "GUEST", "AGE", "EXPIRES", "ADDRESS", "HEARTBEAT", "CLUSTER"
+        "{:<24} {:<16} {:<8} {:<10} {:<16} {}",
+        "SESSION", "GUEST", "AGE", "EXPIRES", "ADDRESS", "CLUSTER"
     );
     let mut reused: Vec<String> = Vec::new();
     for s in sessions {
@@ -746,26 +794,13 @@ pub fn list() -> Result<()> {
             // moment, and saying "expired" is the only honest thing to show.
             None => "EXPIRED".to_string(),
         };
-        let heartbeat = match s.heartbeat_pid {
-            // The same judgement `down` uses before signalling: alive AND
-            // verifiably ours. An alive pid the OS has recycled for a
-            // stranger is a dead heartbeat wearing a number, and this column
-            // is the dead-man's-switch indicator -- it must not vouch for it.
-            Some(pid) if proc::looks_like_heartbeat(pid) == Some(true) => format!("{pid}"),
-            // A dead heartbeat means the expiry has stopped moving. Nothing is
-            // leaked -- that is what the tag is for -- but the session is now
-            // on a countdown nobody is winding.
-            Some(pid) => format!("{pid} DEAD"),
-            None => "none".to_string(),
-        };
         say!(
-            "{:<24} {:<16} {:<8} {:<10} {:<16} {:<12} {}",
+            "{:<24} {:<16} {:<8} {:<10} {:<16} {}",
             s.name,
             s.guest,
             duration::format_rough(s.age(now)),
             expires,
             s.address.map(|a| a.to_string()).unwrap_or_else(|| "-".into()),
-            heartbeat,
             verdict
         );
     }
@@ -947,27 +982,8 @@ pub fn down(session: Option<String>, all: bool, manifest_path: Option<PathBuf>) 
         // Heartbeat next. A renewal landing between the destroy and the
         // forget would be harmless but confusing in the logs, and there is no
         // reason to leave the process running once its session is going.
-        if let Some(pid) = s.heartbeat_pid {
-            // The pid is verified before anything is signalled: it was
-            // recorded by a different process, possibly days ago, and the OS
-            // reuses identifiers. An unrecognized pid is left alone -- the
-            // heartbeat exits by itself once the session leaves the store.
-            match proc::looks_like_heartbeat(pid) {
-                Some(true) => {
-                    if !proc::stop(pid) {
-                        warn_line!("{}: heartbeat {pid} would not stop", s.name);
-                    }
-                }
-                Some(false) => warn_line!(
-                    "{}: pid {pid} is no longer the heartbeat (reused after a reboot?); leaving it alone",
-                    s.name
-                ),
-                None => {} // already gone
-            }
-        }
-
         // The machine is verified before anything is destroyed, for the reason
-        // the heartbeat pid above is verified: this record was written by a
+        // a recorded pid used to be verified here: this record was written by a
         // different process, possibly days ago, and THE POOL REUSES
         // IDENTIFIERS TOO. Machine 9005 was one session's and was handed to
         // another after the first was collected; the store is per-box, so a
@@ -1022,65 +1038,6 @@ pub fn down(session: Option<String>, all: bool, manifest_path: Option<PathBuf>) 
         return Err(format!("{failures} session(s) could not be destroyed").into());
     }
     Ok(())
-}
-
-/// Renew one session's expiry until the session goes away.
-///
-/// This is the live half of the dead-man's switch. If it stops -- crash, closed
-/// laptop, killed terminal -- the expiry stops moving and the sweeper collects
-/// the machine. That is the intended behaviour, not a failure mode.
-pub fn heartbeat(name: &str) -> Result<()> {
-    let cfg = load_config()?;
-    let store = Store::open();
-    let provider = provider_for(&cfg)?;
-    let interval = cfg.session.heartbeat_interval;
-
-    loop {
-        // A transient store failure (somebody else holding the lock) must not
-        // kill the renewal loop: nothing restarts it, so dying here converts
-        // a blip into a machine collected while in use. Only the session
-        // genuinely being gone ends the loop.
-        let session = match store.get(name) {
-            Ok(Some(s)) => s,
-            // `down` removed it. Nothing to renew and nothing to report.
-            Ok(None) => return Ok(()),
-            Err(e) => {
-                warn_line!("{name}: could not read the session store: {e}");
-                std::thread::sleep(interval);
-                continue;
-            }
-        };
-
-        let expires_at = SystemTime::now() + session.ttl;
-        match provider.set_expiry(&session.machine, expires_at) {
-            Ok(()) => {
-                // The machine is renewed even when the record cannot say so;
-                // the record catches up on the next tick.
-                if let Err(e) = store.update(name, |s| s.expires_at = expires_at) {
-                    warn_line!("{name}: renewed, but could not record it: {e}");
-                }
-            }
-            // Gone is not a blip: the cluster listing no longer shows the
-            // machine, and nothing this loop does will bring it back. Looping
-            // on warning every interval would be a leaked process wearing a
-            // log line.
-            Err(reaper_core::ProviderError::NotFound(_)) => {
-                warn_line!(
-                    "{name}: its machine is gone; nothing left to renew, so this heartbeat is ending. `reaper down {name}` clears the record"
-                );
-                return Ok(());
-            }
-            Err(e) => {
-                // Keep going. A single failed renewal is survivable precisely
-                // because the interval fits several times into the TTL -- that
-                // margin is why the configuration insists on it. Giving up here
-                // would convert a blip into a destroyed session.
-                warn_line!("{name}: renewal failed: {e}");
-            }
-        }
-
-        std::thread::sleep(interval);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1180,6 +1137,9 @@ pub fn sync(session: Option<String>, manifest_path: Option<PathBuf>) -> Result<(
     let mut failures = 0;
     for s in implied_sessions(&store, session, Some(&manifest.project))? {
         let attempt = || -> Result<()> {
+            // Renewed only while THIS session's work runs, and stopped when it
+            // returns. Nothing renews between commands.
+            let _renewing = Renewing::during(&cfg, &s.name);
             let ssh = ssh_for(&cfg, &s)?;
             deliver_runner(&ssh)?;
             let (work, results) = workspace(&ssh, &manifest.project)?;
@@ -1389,6 +1349,9 @@ fn reset_before_run(
     // manifest. Per session, too: a fresh session skipping its first reset
     // must not cancel the rollback its older sibling was owed.
     for s in &sessions {
+        // Renewed only while THIS session's work runs, and stopped when it
+        // returns. Nothing renews between commands.
+        let _renewing = Renewing::during(&cfg, &s.name);
         let ssh = ssh_for(&cfg, s)?;
         deliver_runner(&ssh)?;
         let mut missing = false;
@@ -1442,6 +1405,9 @@ pub fn snapshot(
     }
 
     for s in implied_sessions(&store, session, Some(&manifest.project))? {
+        // Renewed only while THIS session's work runs, and stopped when it
+        // returns. Nothing renews between commands.
+        let _renewing = Renewing::during(&cfg, &s.name);
         let ssh = ssh_for(&cfg, &s)?;
         deliver_runner(&ssh)?;
         for d in datasets {
@@ -1479,6 +1445,9 @@ pub fn reset(
     let name = to.unwrap_or_else(|| PRISTINE.to_string());
 
     for s in implied_sessions(&store, session, Some(&manifest.project))? {
+        // Renewed only while THIS session's work runs, and stopped when it
+        // returns. Nothing renews between commands.
+        let _renewing = Renewing::during(&cfg, &s.name);
         let ssh = ssh_for(&cfg, &s)?;
         deliver_runner(&ssh)?;
 
@@ -1556,6 +1525,9 @@ pub fn exec(
 
     let mut failures = 0;
     for s in implied_sessions(&store, session, Some(&manifest.project))? {
+        // Renewed only while THIS session's work runs, and stopped when it
+        // returns. Nothing renews between commands.
+        let _renewing = Renewing::during(&cfg, &s.name);
         // Nothing has ever been pushed, so the workspace is empty; a build
         // has nothing to compile and a run's "success" would be meaningless
         // -- and on a project with reset datasets, that success would take
@@ -2019,59 +1991,8 @@ pub fn doctor(
                     notes.push("its record is expired: the sweeper may take \
                                 the machine at any moment".to_string());
                 }
-                match s.heartbeat_pid {
-                    Some(pid) if proc::looks_like_heartbeat(pid) == Some(true) => {
-                        // Ask the expiry, not the log. A heartbeat writes to
-                        // its log only when it has something to SAY -- a
-                        // successful renewal says nothing -- so the log's mtime
-                        // freezes at session creation and reports every healthy
-                        // session as stalled once it is older than two
-                        // intervals. Measured: over 341s the expiry moved 301s
-                        // and the log moved 0s.
-                        //
-                        // Renewal pushes the expiry to now + ttl every
-                        // interval, so remaining should stay within an interval
-                        // or so of the full ttl. Letting it decay past two is
-                        // the symptom of a heartbeat that is running but no
-                        // longer renewing -- which is exactly what the old
-                        // check meant to catch, and could not.
-                        if let Some(remaining) = s.remaining(now) {
-                            let floor = s
-                                .ttl
-                                .checked_sub(cfg.session.heartbeat_interval * 2);
-                            if let Some(floor) = floor {
-                                if remaining < floor {
-                                    if worst == Health::Ok {
-                                        worst = Health::Warn;
-                                    }
-                                    notes.push(format!(
-                                        "its heartbeat is alive but the expiry \
-                                         has decayed to {}s of a {}s ttl -- \
-                                         renewal may not be happening",
-                                        remaining.as_secs(),
-                                        s.ttl.as_secs()
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    Some(_) => {
-                        if worst == Health::Ok {
-                            worst = Health::Warn;
-                        }
-                        notes.push("its heartbeat is dead: the expiry has \
-                                    stopped moving".to_string());
-                    }
-                    None => {
-                        if worst == Health::Ok {
-                            worst = Health::Warn;
-                        }
-                        notes.push("it has no heartbeat: the expiry never \
-                                    moves".to_string());
-                    }
-                }
                 if notes.is_empty() {
-                    notes.push("record, machine and heartbeat agree".to_string());
+                    notes.push("record and machine agree".to_string());
                 }
                 r.line(&format!("session {}", s.name), worst, &notes.join("\n"));
             }
