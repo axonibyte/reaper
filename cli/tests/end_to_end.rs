@@ -1628,15 +1628,22 @@ fn up_leaves_nothing_renewing_behind_it() {
         "and do not announce a process that is not there: {out}"
     );
 
-    // The cheap discriminator against REINTRODUCING a daemon: one would record
-    // its pid here. A thread cannot, because it does not survive the command
-    // that owns it -- so a pid in this record means a detached process exists
-    // again. This is the arm a leaked in-process renewer could never trip,
-    // which is why the assertion is about the RECORD and not about timing.
+    // The cheap discriminator against REINTRODUCING a daemon: anything that
+    // renews after the command exits has to be findable again, and the only
+    // place this store can keep it is a pid. A thread needs none, because it
+    // does not outlive the command that owns it. So the guard is a property of
+    // the SCHEMA, not of timing -- which is the arm a leaked in-process
+    // renewer could never trip.
+    //
+    // Spelled as "no pid-shaped key at all" rather than naming the field that
+    // used to be here: that field is gone now, so naming it would make this
+    // assertion unfailable, and re-adding a daemon would reach for a new name
+    // anyway.
     let raw = std::fs::read_to_string(h.dir.join("sessions.json")).expect("store");
     assert!(
-        raw.contains("\"heartbeat_pid\": null") || !raw.contains("heartbeat_pid"),
-        "up recorded a renewer pid, so something detached is running again:\n{raw}"
+        !raw.to_lowercase().contains("pid"),
+        "the record names a pid, so something detached is being kept track of \
+         again:\n{raw}"
     );
 }
 

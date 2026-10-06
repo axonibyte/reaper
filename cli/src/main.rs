@@ -12,7 +12,6 @@
 mod out;
 
 mod commands;
-mod proc;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

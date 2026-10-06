@@ -283,7 +283,6 @@ fn session(name: &str, machine: &str) -> Session {
         ready_at: None,
         expires_at: now + Duration::from_secs(7200),
         ttl: Duration::from_secs(7200),
-        heartbeat_pid: Some(4242),
         synced_at: None,
         provider: Some("a-provider".to_string()),
     }
@@ -299,7 +298,6 @@ fn a_session_round_trips_through_the_store() {
     assert_eq!(got.machine, MachineRef::new("m-1"));
     assert_eq!(got.address, Some("192.0.2.10".parse().unwrap()));
     assert_eq!(got.ttl, Duration::from_secs(7200));
-    assert_eq!(got.heartbeat_pid, Some(4242));
     assert_eq!(got.expires_at, got.created_at + Duration::from_secs(7200));
 }
 
@@ -328,6 +326,13 @@ fn a_record_written_before_the_provider_was_recorded_still_reads() {
     // missing required field and serde refuses the whole document. The two
     // Options are asserted by value for the same reason -- a wrong key there
     // would quietly read as None.
+    //
+    // The `heartbeat_pid` below is deliberate and is now the OTHER half of
+    // this fixture: the field was REMOVED when renewal stopped using a
+    // detached process, and every store written before that still carries it.
+    // `Session` sets no `deny_unknown_fields`, so such a record must still
+    // load -- and if anybody adds that attribute, this is the test that says
+    // what it costs.
     let dir = scratch_dir("provider-legacy");
     let path = dir.join("sessions.json");
     std::fs::write(
@@ -349,7 +354,6 @@ fn a_record_written_before_the_provider_was_recorded_still_reads() {
     assert_eq!(got.provider, None, "unknown, not guessed");
     assert_eq!(got.machine, MachineRef::new("m-1"));
     assert_eq!(got.address, Some("192.0.2.10".parse().unwrap()));
-    assert_eq!(got.heartbeat_pid, Some(4242));
 }
 
 #[test]
@@ -564,7 +568,7 @@ fn updating_a_session_moves_only_that_session() {
 fn updating_a_session_that_is_not_there_says_so() {
     let dir = scratch_dir("update-absent");
     let store = Store::at(dir.join("sessions.json"));
-    assert!(!store.update("ghost", |s| s.heartbeat_pid = None).unwrap());
+    assert!(!store.update("ghost", |s| s.address = None).unwrap());
 }
 
 #[test]

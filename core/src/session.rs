@@ -138,10 +138,6 @@ pub struct Session {
     #[serde(with = "secs")]
     pub ttl: Duration,
 
-    /// The heartbeat renewing this session's expiry, if one was started.
-    #[serde(default)]
-    pub heartbeat_pid: Option<u32>,
-
     /// When a working tree was last pushed into this session. `None` means one
     /// never has been, which is how `down` knows there is nothing to collect on
     /// the way past -- pulling from a directory that was never created would
