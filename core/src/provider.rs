@@ -182,6 +182,29 @@ pub trait Provider {
     /// cluster reports only its own part.
     fn list(&self) -> Result<Vec<MachineSummary>>;
 
+    /// Whether this machine still bears the name this provider would give a
+    /// session called `session`.
+    ///
+    /// DELIBERATELY NOT "is this still our machine". A provider may have to
+    /// bend a session name to something its API accepts, and that bending can
+    /// be lossy -- so two different sessions can end up wanting the same
+    /// machine name. That makes this sound in ONE DIRECTION ONLY:
+    ///
+    ///   `Some(false)`  the name does not match, so this is NOT the machine
+    ///                  that session was given. The only answer a caller may
+    ///                  act destructively on.
+    ///   `Some(true)`   consistent. NOT proof, because of the lossiness above.
+    ///   `None`         the provider cannot tell, including "no such machine".
+    ///
+    /// The comparison lives here rather than in the caller because the name
+    /// transform is the provider's and nothing outside it should know the
+    /// shape. The default implementation declines to answer rather than
+    /// vouching for a machine it never looked at.
+    fn bears_name_of(&self, machine: &MachineRef, session: &str) -> Result<Option<bool>> {
+        let _ = (machine, session);
+        Ok(None)
+    }
+
     /// Everything this provider can check about the site without creating
     /// anything: reachability, credentials, the registered templates, room,
     /// hygiene. Infallible by design -- for a doctor, errors ARE findings,

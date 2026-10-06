@@ -909,6 +909,29 @@ pub fn down(session: Option<String>, all: bool, manifest_path: Option<PathBuf>) 
             }
         }
 
+        // The machine is verified before anything is destroyed, for the reason
+        // the heartbeat pid above is verified: this record was written by a
+        // different process, possibly days ago, and THE POOL REUSES
+        // IDENTIFIERS TOO. Machine 9005 was one session's and was handed to
+        // another after the first was collected; the store is per-box, so a
+        // record here can name a machine another box is using right now, and
+        // `down` is aimed by exactly such a record.
+        //
+        // Only a definite mismatch refuses. An error or an "I cannot tell" is
+        // left to fall through to `destroy`, which is the behavior that
+        // existed before this check: a provider that cannot answer this
+        // question cannot carry out the destroy either, and it reports that
+        // itself rather than stranding a session nobody can remove.
+        if let Ok(Some(false)) = provider.bears_name_of(&s.machine, &s.name) {
+            warn_line!(
+                "{}: the machine in this record ({}) does not carry this session's name any more -- the pool has given it to something else. Refusing to destroy it. `reaper list` shows what this box still has a record of",
+                s.name,
+                s.machine
+            );
+            failures += 1;
+            continue;
+        }
+
         match provider.destroy(&s.machine) {
             Ok(()) => {
                 store.remove(&s.name)?;

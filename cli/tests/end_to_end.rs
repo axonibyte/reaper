@@ -1942,6 +1942,39 @@ fn an_up_nobody_answers_leaves_an_inspectable_tagged_session() {
 }
 
 #[test]
+fn down_refuses_a_machine_the_pool_has_given_to_something_else() {
+    let h = Harness::new("downrecycled");
+    h.ok(&["up"]);
+    let m = h.hypervisor.machine_named("a-project").expect("machine");
+    let id: u32 = m.parse().expect("an id this provider issued");
+
+    // The pool collected this session's machine and handed the SAME id to
+    // somebody else's -- measured in the field: machine 9005 was `css`'s and
+    // was reaper's answer for `merlin-cal` the same night. This box's record
+    // still names it, and `down` is aimed by exactly such a record.
+    h.hypervisor.with_state(|s| {
+        s.vms
+            .get_mut(&id)
+            .expect("the machine we just created")
+            .name = "someone-elses".to_string();
+    });
+
+    let err = h.fails(&["down"]);
+    assert!(
+        err.contains("does not carry this session's name"),
+        "refuse by name, and say why: {err}"
+    );
+    assert!(
+        h.hypervisor.machine_named("someone-elses").is_some(),
+        "the other session's machine must survive a down aimed at a stale record"
+    );
+    assert!(
+        h.ok(&["list"]).contains("a-project"),
+        "and the record is kept, because forgetting it would hide the problem"
+    );
+}
+
+#[test]
 fn a_destroy_the_hypervisor_refuses_keeps_the_session_visible() {
     let h = Harness::new("downrefused");
     h.ok(&["up"]);

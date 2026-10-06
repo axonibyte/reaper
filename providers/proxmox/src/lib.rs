@@ -685,6 +685,21 @@ impl Provider for Proxmox {
     /// and Pool.Audit grants no site is required to have given. The node's
     /// health is evidenced through the template checks, whose requests all
     /// cross it.
+    fn bears_name_of(&self, machine: &MachineRef, session: &str) -> Result<Option<bool>> {
+        // Read from the listing rather than the machine's own config: the
+        // listing is what every other reconciliation here uses, so one answer
+        // cannot disagree with another about whether a machine exists.
+        let want = sanitize_name(session);
+        for m in self.list()? {
+            if &m.machine == machine {
+                return Ok(Some(m.name == want));
+            }
+        }
+        // Absent, which is not a mismatch. `destroy` is already idempotent
+        // about a machine the sweeper took, and that path reports it properly.
+        Ok(None)
+    }
+
     fn diagnose(&self, guests: &[RegisteredGuest]) -> Vec<Finding> {
         let mut out = Vec::new();
         let mut push = |label: &str, health: Health, detail: String| {
