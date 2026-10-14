@@ -164,9 +164,30 @@ pub fn up(
             // machine the sweeper has taken hands back a session every verb
             // fails against, with a heartbeat that ends seconds later.
             let live_machines = provider.list()?;
-            if !live_machines.iter().any(|m| m.machine == existing.machine) {
+            let Some(summary) = live_machines.iter().find(|m| m.machine == existing.machine)
+            else {
                 return Err(format!(
                     "{name}: its machine is gone (the sweeper collects anything past its expiry). `reaper down {name}` clears the record, and the next `reaper up` starts fresh"
+                )
+                .into());
+            };
+            // PRESENCE IS NOT OWNERSHIP, and the pool recycles identifiers.
+            // Asking only whether the id is listed is what let `up` answer
+            // "already up ... reusing it" about a machine the pool had given to
+            // another session -- exit 0, on somebody else's VM, handing every
+            // verb after it a tree to push across that boundary. `list` has
+            // always distinguished these two questions; see `cluster_verdict`.
+            // One listing, one comparison: the reason
+            // `summary_bears_name_of` exists rather than re-fetching per record.
+            //
+            // Only a definite mismatch refuses, matching `down`: a provider
+            // that cannot say whose machine this is cannot be trusted to deny
+            // the reuse either, and stranding a session nobody can resume is
+            // the worse failure.
+            if let Some(false) = provider.summary_bears_name_of(summary, &name) {
+                return Err(format!(
+                    "{name}: its machine ({}) is live but carries another session's name, so there is nothing here to reuse. `reaper down {name}` leaves that machine alone and forgets this box's record; the next `reaper up` starts fresh",
+                    existing.machine
                 )
                 .into());
             }
@@ -973,36 +994,49 @@ pub fn down(session: Option<String>, all: bool, manifest_path: Option<PathBuf>) 
 
     let mut failures = 0;
     for s in targets {
-        // Results before anything else, and before the heartbeat stops: a
-        // collection of a large artifact takes time, and the expiry should keep
-        // moving while it does.
-        collect_last_results(&cfg, &s, manifest_path.as_deref());
-
-        // Heartbeat next. A renewal landing between the destroy and the
-        // forget would be harmless but confusing in the logs, and there is no
-        // reason to leave the process running once its session is going.
-        // The machine is verified before anything is destroyed, for the reason
-        // a recorded pid used to be verified here: this record was written by a
-        // different process, possibly days ago, and THE POOL REUSES
-        // IDENTIFIERS TOO. Machine 9005 was one session's and was handed to
-        // another after the first was collected; the store is per-box, so a
-        // record here can name a machine another box is using right now, and
-        // `down` is aimed by exactly such a record.
+        // OWNERSHIP FIRST, BEFORE ANYTHING THAT TOUCHES THE MACHINE. This
+        // record was written by a different process, possibly days ago, and
+        // THE POOL REUSES IDENTIFIERS: machine 9005 was one session's and was
+        // handed to another after the first was collected. The store is
+        // per-box, so a record here can name a machine another box is using
+        // right now, and `down` is aimed by exactly such a record.
         //
-        // Only a definite mismatch refuses. An error or an "I cannot tell" is
+        // This check used to sit AFTER collect_last_results, which ssh's and
+        // rsync's into the machine to fetch results -- so a stale record sent
+        // this session's key into another project's VM before anything asked
+        // whether the machine was ours. The collection is worth having and it
+        // is not worth having first.
+        //
+        // Only a definite mismatch acts. An error or an "I cannot tell" is
         // left to fall through to `destroy`, which is the behavior that
         // existed before this check: a provider that cannot answer this
         // question cannot carry out the destroy either, and it reports that
         // itself rather than stranding a session nobody can remove.
         if let Ok(Some(false)) = provider.bears_name_of(&s.machine, &s.name) {
-            warn_line!(
-                "{}: the machine in this record ({}) does not carry this session's name any more -- the pool has given it to something else. Refusing to destroy it. `reaper list` shows what this box still has a record of",
+            // THE MACHINE IS LEFT ALONE AND THE RECORD IS FORGOTTEN. Doing
+            // neither was the wedge: `down` is the only verb that can clear a
+            // record, so a recycled id left a session that could be neither
+            // cleared nor reused, while `list` told the operator to
+            // "reconcile" with a verb that does not exist. The record is
+            // PROVABLY stale -- the machine bears another session's name -- so
+            // forgetting it loses nothing and hides nothing; what it hid
+            // before was the operator's only way out. Same shape as the
+            // NotFound arm below, and not a failure for the same reason: the
+            // operator asked to be rid of this session, and they are.
+            store.remove(&s.name)?;
+            forget_workstation_files(&s.name);
+            say!(
+                "{}: machine {} carries another session's name now -- left alone, and this box's record is forgotten",
                 s.name,
                 s.machine
             );
-            failures += 1;
             continue;
         }
+
+        // Results next, now that the machine is known to be this session's.
+        // Before the heartbeat stops: a collection of a large artifact takes
+        // time, and the expiry should keep moving while it does.
+        collect_last_results(&cfg, &s, manifest_path.as_deref());
 
         match provider.destroy(&s.machine) {
             Ok(()) => {

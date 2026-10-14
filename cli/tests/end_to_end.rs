@@ -2024,7 +2024,7 @@ fn up_fails_loudly_when_the_token_may_not_read_the_guest_agent() {
 }
 
 #[test]
-fn down_refuses_a_machine_the_pool_has_given_to_something_else() {
+fn down_spares_a_machine_the_pool_gave_away_and_forgets_the_record() {
     let h = Harness::new("downrecycled");
     h.ok(&["up"]);
     let m = h.hypervisor.machine_named("a-project").expect("machine");
@@ -2041,18 +2041,101 @@ fn down_refuses_a_machine_the_pool_has_given_to_something_else() {
             .name = "someone-elses".to_string();
     });
 
-    let err = h.fails(&["down"]);
-    assert!(
-        err.contains("does not carry this session's name"),
-        "refuse by name, and say why: {err}"
-    );
+    // This used to refuse BOTH halves and exit non-zero, and the assertion
+    // below used to read "the record is kept, because forgetting it would hide
+    // the problem". It hid the operator's only way out instead: `down` is the
+    // only verb that can clear a record, so the session could be neither
+    // cleared nor reused and `list` said "reconcile" naming no such verb.
+    let said = h.ok(&["down"]);
     assert!(
         h.hypervisor.machine_named("someone-elses").is_some(),
         "the other session's machine must survive a down aimed at a stale record"
     );
     assert!(
-        h.ok(&["list"]).contains("a-project"),
-        "and the record is kept, because forgetting it would hide the problem"
+        said.contains("left alone") && said.contains("forgotten"),
+        "say both halves -- what was spared and what was dropped: {said}"
+    );
+    assert!(
+        !h.ok(&["list"]).contains("a-project"),
+        "the record is provably stale, so it must be gone: {said}"
+    );
+    // And the way out is complete: a fresh `up` must now be able to start.
+    let fresh = h.ok(&["up"]);
+    assert!(
+        fresh.contains("creating"),
+        "after the forget, `up` starts a new session rather than reusing: {fresh}"
+    );
+}
+
+#[test]
+fn down_does_not_reach_into_a_machine_it_is_about_to_spare() {
+    // The ownership check used to sit AFTER result collection, which ssh's and
+    // rsync's into the machine. For a record whose whole defect is that it
+    // names somebody else's VM, that sent this session's key into it before
+    // anything asked whose it was. Collection needs a sync to have happened at
+    // all -- `collect_last_results` returns early on `synced_at: None` -- so
+    // the bare-`up` tests above could never have caught this.
+    let h = Harness::new("downrecycledssh");
+    h.ok(&["up"]);
+    h.ok(&["sync"]);
+    let m = h.hypervisor.machine_named("a-project").expect("machine");
+    let id: u32 = m.parse().expect("an id this provider issued");
+    h.hypervisor.with_state(|s| {
+        s.vms
+            .get_mut(&id)
+            .expect("the machine we just created")
+            .name = "someone-elses".to_string();
+    });
+
+    let before = h.ssh_log().len();
+    let said = h.ok(&["down"]);
+    let after = h.ssh_log().len();
+
+    assert_eq!(
+        before, after,
+        "down must not open a connection to a machine it has decided is not \
+         this session's; the log grew by {} byte(s): {said}",
+        after.saturating_sub(before)
+    );
+    assert!(
+        !said.contains("results collected") && !said.contains("could not collect results"),
+        "collection must not even be attempted on a reused record: {said}"
+    );
+}
+
+#[test]
+fn up_refuses_a_record_whose_machine_the_pool_gave_away() {
+    // The id is LIVE, so the "its machine is gone" branch does not fire; the
+    // defect was that presence was the only question asked, so `up` answered
+    // "already up ... reusing it", exited 0, and handed every verb after it
+    // another project's machine to push a tree into.
+    let h = Harness::new("uprecycled");
+    h.ok(&["up"]);
+    let m = h.hypervisor.machine_named("a-project").expect("machine");
+    let id: u32 = m.parse().expect("an id this provider issued");
+    h.hypervisor.with_state(|s| {
+        s.vms
+            .get_mut(&id)
+            .expect("the machine we just created")
+            .name = "someone-elses".to_string();
+    });
+
+    let err = h.fails(&["up"]);
+    assert!(
+        !err.contains("reusing it"),
+        "it must not adopt another session's machine: {err}"
+    );
+    assert!(
+        err.contains("another session's name"),
+        "say why there is nothing to reuse: {err}"
+    );
+    assert!(
+        err.contains("reaper down"),
+        "and name the way out, which now works: {err}"
+    );
+    assert!(
+        h.hypervisor.machine_named("someone-elses").is_some(),
+        "and nothing of the other session's is touched"
     );
 }
 
