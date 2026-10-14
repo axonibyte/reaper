@@ -9,4 +9,4 @@ members = ["manifest", "core", "providers/proxmox", "providers/registry", "cli"]
 edition = "2021"
 license = "MIT"
 authors = ["Axonibyte Innovations, LLC"]
-repository = "https://bitbucket.org/axonibyte/reaper"
+repository = "https://forge.axonibyte.com/axonibyte/reaper"
