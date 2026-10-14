@@ -2595,7 +2595,25 @@ fn a_canary_collected_is_the_sweeper_proven() {
     // but its state is shared, which is all a pretend sweeper needs.
     let state = h.hypervisor.state.clone();
     let sweeper = std::thread::spawn(move || {
-        // Play the sweeper: take the canary once it exists.
+        // Play the sweeper: take the canary once it is COLLECTABLE -- named AND
+        // carrying an expiry -- because an expiry is the only thing a real
+        // sweeper collects on. An untagged machine has no expiry and so is
+        // never taken by anything; the provider calls that "the one state
+        // nothing ever collects" and deliberately keeps the window short
+        // ("does not widen the window in which the machine exists without a
+        // tag" -- quoted rather than cited by path, because the provider seam
+        // guard forbids naming that crate from here and a quoted phrase is the
+        // better address anyway). Taking the canary on EXISTENCE modelled
+        // something no sweeper can do.
+        //
+        // And it raced that window. `create` clones first and sets the expiry
+        // in a second config call, so this thread could remove the machine in
+        // between; the expiry then landed on a machine that was gone, and a
+        // pool-scoped token answers a per-VM route for a gone machine with 403
+        // "Permission check failed (VM.Config.Options)" -- the 403 trap the
+        // provider documents, where the ACL check precedes the existence
+        // check. So the race reported itself as a missing permission,
+        // and this test failed six times in eight.
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
             let taken = {
@@ -2603,7 +2621,13 @@ fn a_canary_collected_is_the_sweeper_proven() {
                 let id = s
                     .vms
                     .iter()
-                    .find(|(_, vm)| vm.name == "reaper-doctor-canary")
+                    .find(|(_, vm)| {
+                        vm.name == "reaper-doctor-canary"
+                            && vm
+                                .tags
+                                .split([';', ','])
+                                .any(|t| t.trim().starts_with("expires-"))
+                    })
                     .map(|(id, _)| *id);
                 match id {
                     Some(id) => {
