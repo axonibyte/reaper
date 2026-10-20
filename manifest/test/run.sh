@@ -48,6 +48,29 @@ expect() {
     fi
 }
 
+# says <wanted-substring> <label> <file>
+#
+# For the cases where WHAT it says is the claim rather than merely that it
+# accepted. A tenant sharding a suite is buying a machine per job, and the tool
+# the onboarding instructions point at is where that figure belongs.
+says() {
+    wanted=$1
+    label=$2
+    file=$3
+
+    output=$("${validate}" "${file}" 2>&1) || true
+    case "${output}" in
+        *"${wanted}"*)
+            pass=$((pass + 1))
+            printf '  ok    %-28s %s\n' "${label}" "$(basename "${file}")" ;;
+        *)
+            fail=$((fail + 1))
+            printf '  FAIL  %-28s %s (wanted %s)\n' \
+                "${label}" "$(basename "${file}")" "${wanted}"
+            printf '%s\n' "${output}" | sed 's/^/          /' ;;
+    esac
+}
+
 echo "this project's own manifest -- must be accepted"
 # reaper is a tenant of itself, and that manifest is the only one in this
 # repository that a session actually runs. A change that broke it would
@@ -68,6 +91,10 @@ echo "invalid fixtures -- must be rejected"
 for f in "${here}"/invalid/*.toml; do
     expect 1 "rejected" "${f}"
 done
+
+echo "what it reports -- the figure a tenant is buying"
+says "4 sessions -- one per job" "counts sessions" "${here}/valid/run-jobs.toml"
+says "(1 guest)" "and does not when there are no jobs" "${here}/valid/minimal.toml"
 
 echo
 echo "${pass} passed, ${fail} failed"
