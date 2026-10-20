@@ -74,7 +74,7 @@ pub fn parse(s: &str) -> Result<Duration, ParseError> {
 pub fn format(d: Duration) -> String {
     let s = d.as_secs();
     for (unit, per) in [("d", 86_400u64), ("h", 3_600), ("m", 60)] {
-        if s % per == 0 && s >= per {
+        if s.is_multiple_of(per) && s >= per {
             return format!("{}{unit}", s / per);
         }
     }
@@ -108,7 +108,18 @@ mod tests {
     fn rejects_what_it_should() {
         // Each of these is a plausible thing to type, and each would mean
         // something the caller did not intend if it were quietly accepted.
-        for bad in ["", "h", "2", "1.5h", "90 minutes", "-1h", "2H", "0h", "0s", "2x"] {
+        for bad in [
+            "",
+            "h",
+            "2",
+            "1.5h",
+            "90 minutes",
+            "-1h",
+            "2H",
+            "0h",
+            "0s",
+            "2x",
+        ] {
             assert!(parse(bad).is_err(), "{bad:?} should not parse");
         }
     }

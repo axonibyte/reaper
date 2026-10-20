@@ -148,7 +148,6 @@ enum Command {
         #[arg(long)]
         manifest: Option<PathBuf>,
     },
-
 }
 
 fn main() -> ExitCode {
@@ -158,7 +157,11 @@ fn main() -> ExitCode {
         // Doctor has its own exit contract -- 0 healthy / 1 failed findings /
         // 2 could-not-run -- which the shared Ok/Err mapping below cannot
         // express, and its report must not gain a "reaper:" prefix line.
-        Command::Doctor { manifest, canary, within } => {
+        Command::Doctor {
+            manifest,
+            canary,
+            within,
+        } => {
             return match commands::doctor(manifest, canary, within) {
                 Ok(v) if v.fail == 0 => ExitCode::SUCCESS,
                 Ok(_) => ExitCode::FAILURE,

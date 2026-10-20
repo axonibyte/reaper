@@ -152,7 +152,7 @@ impl Config {
 
 // deny_unknown_fields: a typoed key silently getting its default is the
 // worst outcome a config file has -- the guest entry already refuses one.
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSession {
     default_ttl: Option<String>,
@@ -167,25 +167,6 @@ struct RawSession {
     io_timeout: Option<String>,
     rsync_command: Option<String>,
     results_interval: Option<String>,
-}
-
-impl Default for RawSession {
-    fn default() -> Self {
-        RawSession {
-            default_ttl: None,
-            heartbeat_interval: None,
-            ready_grace: None,
-            max_concurrent: None,
-            default_disk_gb: None,
-            ssh_user: None,
-            ssh_key: None,
-            ssh_command: None,
-            ssh_connect_timeout: None,
-            io_timeout: None,
-            rsync_command: None,
-            results_interval: None,
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -286,7 +267,7 @@ pub fn parse(text: &str, path: &Path) -> Result<Config, ConfigError> {
     // not a reason to panic on Duration overflow.
     if heartbeat_interval
         .checked_mul(3)
-        .map_or(true, |m| m > default_ttl)
+        .is_none_or(|m| m > default_ttl)
     {
         return Err(invalid(format!(
             "session.heartbeat_interval is {} but session.default_ttl is only {}: \
@@ -332,7 +313,10 @@ pub fn parse(text: &str, path: &Path) -> Result<Config, ConfigError> {
                 "15s",
             )?,
             io_timeout: dur("io_timeout", raw.session.io_timeout.as_ref(), "5m")?,
-            rsync_command: raw.session.rsync_command.unwrap_or_else(|| "rsync".to_string()),
+            rsync_command: raw
+                .session
+                .rsync_command
+                .unwrap_or_else(|| "rsync".to_string()),
             results_interval,
         },
         guests: raw.guests,

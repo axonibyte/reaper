@@ -96,7 +96,13 @@ mod tests {
 
     #[test]
     fn a_machine_with_no_expiry_reports_none() {
-        for tags in ["", "ephemeral", "ephemeral;owner-cal", "expires-", "expires-soon"] {
+        for tags in [
+            "",
+            "ephemeral",
+            "ephemeral;owner-cal",
+            "expires-",
+            "expires-soon",
+        ] {
             assert_eq!(expiry_of(tags), None, "{tags:?}");
         }
     }

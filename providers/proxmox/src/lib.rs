@@ -9,12 +9,12 @@
 
 pub mod config;
 pub mod http;
+pub mod ids;
 /// A stand-in API for tests. Behind a feature so that other crates -- the CLI,
 /// principally -- can drive the whole stack against a fake hypervisor without
 /// it ever being compiled into a shipped binary.
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
-pub mod ids;
 pub mod tags;
 
 use std::collections::BTreeMap;
@@ -123,7 +123,10 @@ impl Proxmox {
     /// live during acceptance; address() and destroy() learned it first, and
     /// this is what holds their siblings to the same reading.
     fn disambiguate(&self, id: u32, e: ProviderError) -> ProviderError {
-        if matches!(e, ProviderError::NotFound(_) | ProviderError::Unauthorized(_)) {
+        if matches!(
+            e,
+            ProviderError::NotFound(_) | ProviderError::Unauthorized(_)
+        ) {
             match self.occupied_in_range() {
                 Ok(listed) if !listed.contains(&id) => {
                     return ProviderError::NotFound(format!("machine {id} no longer exists"));
@@ -455,7 +458,6 @@ impl Provider for Proxmox {
             }
         };
 
-
         // Expiry first, before anything else and before the machine is ever
         // started. Between the clone finishing and this succeeding the machine
         // is untagged, which is the one state nothing will ever clean up -- so
@@ -492,16 +494,13 @@ impl Provider for Proxmox {
                      is not set, so there is nowhere to put it"
                 ))
             })?;
-            settings.push((
-                self.config.data_bus.as_str(),
-                format!("{storage}:{gb}"),
-            ));
+            settings.push((self.config.data_bus.as_str(), format!("{storage}:{gb}")));
         }
 
-        if let Err(tag_failure) = self
-            .client
-            .put_form(&format!("/nodes/{}/qemu/{id}/config", self.node()), &settings)
-        {
+        if let Err(tag_failure) = self.client.put_form(
+            &format!("/nodes/{}/qemu/{id}/config", self.node()),
+            &settings,
+        ) {
             let cleanup = self.destroy(&machine);
             return Err(match cleanup {
                 Ok(()) => ProviderError::Api {
@@ -557,7 +556,10 @@ impl Provider for Proxmox {
         let id = self.config.ids.check(machine)?;
         let task = self
             .client
-            .post_form(&format!("/nodes/{}/qemu/{id}/status/stop", self.node()), &[])
+            .post_form(
+                &format!("/nodes/{}/qemu/{id}/status/stop", self.node()),
+                &[],
+            )
             .map_err(|e| self.disambiguate(id, e))?;
         self.wait(&task)
     }
@@ -599,7 +601,10 @@ impl Provider for Proxmox {
 
     fn address(&self, machine: &MachineRef) -> Result<Option<IpAddr>> {
         let id = self.config.ids.check(machine)?;
-        let path = format!("/nodes/{}/qemu/{id}/agent/network-get-interfaces", self.node());
+        let path = format!(
+            "/nodes/{}/qemu/{id}/agent/network-get-interfaces",
+            self.node()
+        );
 
         let data = match self.client.get(&path) {
             Ok(d) => d,
@@ -628,9 +633,7 @@ impl Provider for Proxmox {
                     "machine {id} no longer exists"
                 )));
             }
-            Err(ProviderError::Api { message, .. })
-                if message.contains("does not exist") =>
-            {
+            Err(ProviderError::Api { message, .. }) if message.contains("does not exist") => {
                 return Err(ProviderError::NotFound(message));
             }
             Err(e) => return Err(e),
@@ -708,7 +711,11 @@ impl Provider for Proxmox {
     fn diagnose(&self, guests: &[RegisteredGuest]) -> Vec<Finding> {
         let mut out = Vec::new();
         let mut push = |label: &str, health: Health, detail: String| {
-            out.push(Finding { label: label.into(), health, detail })
+            out.push(Finding {
+                label: label.into(),
+                health,
+                detail,
+            })
         };
         let skipped = |what: &str| (Health::Warn, format!("skipped: {what}"));
 
@@ -716,16 +723,24 @@ impl Provider for Proxmox {
         match self.client.get("/version") {
             Ok(v) => {
                 let version = v.get("version").and_then(Value::as_str).unwrap_or("?");
-                push("api", Health::Ok, format!(
-                    "{} answers (version {version}) and accepts the credential",
-                    self.config.api
-                ));
+                push(
+                    "api",
+                    Health::Ok,
+                    format!(
+                        "{} answers (version {version}) and accepts the credential",
+                        self.config.api
+                    ),
+                );
             }
             Err(ProviderError::Unauthorized(m)) => {
-                push("api", Health::Fail, format!(
-                    "{} answers but refuses the credential: {m}",
-                    self.config.api
-                ));
+                push(
+                    "api",
+                    Health::Fail,
+                    format!(
+                        "{} answers but refuses the credential: {m}",
+                        self.config.api
+                    ),
+                );
                 let (h, d) = skipped("the credential is refused");
                 push("pool and sweeper", h, d.clone());
                 push("templates", h, d.clone());
@@ -733,10 +748,14 @@ impl Provider for Proxmox {
                 return out;
             }
             Err(e) => {
-                push("api", Health::Fail, format!(
-                    "{} did not answer: {e}. Nothing past this point could be checked",
-                    self.config.api
-                ));
+                push(
+                    "api",
+                    Health::Fail,
+                    format!(
+                        "{} did not answer: {e}. Nothing past this point could be checked",
+                        self.config.api
+                    ),
+                );
                 let (h, d) = skipped("the API is unreachable");
                 push("pool and sweeper", h, d.clone());
                 push("templates", h, d.clone());
@@ -750,7 +769,11 @@ impl Provider for Proxmox {
         let listing = match self.client.get("/cluster/resources?type=vm") {
             Ok(d) => d.as_array().cloned().unwrap_or_default(),
             Err(e) => {
-                push("pool", Health::Fail, format!("the cluster listing failed: {e}"));
+                push(
+                    "pool",
+                    Health::Fail,
+                    format!("the cluster listing failed: {e}"),
+                );
                 let (h, d) = skipped("the cluster listing failed");
                 push("templates", h, d.clone());
                 push("storage", h, d);
@@ -769,11 +792,15 @@ impl Provider for Proxmox {
                 self.config.pool
             ));
         } else {
-            push("pool", Health::Ok, format!(
-                "pool {} is visible with {} member(s)",
-                self.config.pool,
-                in_pool.len()
-            ));
+            push(
+                "pool",
+                Health::Ok,
+                format!(
+                    "pool {} is visible with {} member(s)",
+                    self.config.pool,
+                    in_pool.len()
+                ),
+            );
         }
 
         // Pool hygiene: the states that want a human.
@@ -830,32 +857,37 @@ impl Provider for Proxmox {
         let mut checked: std::collections::BTreeMap<&str, Vec<&str>> =
             std::collections::BTreeMap::new();
         for g in guests {
-            checked.entry(g.template.as_str()).or_default().push(g.name.as_str());
+            checked
+                .entry(g.template.as_str())
+                .or_default()
+                .push(g.name.as_str());
         }
         for (template, guest_names) in checked {
             let whose = guest_names.join(", ");
             let id = match self.config.ids.check(&MachineRef::new(template)) {
                 Ok(id) => id,
                 Err(e) => {
-                    push("template", Health::Fail, format!(
-                        "template {template} (guest {whose}) is not usable: {e}"
-                    ));
+                    push(
+                        "template",
+                        Health::Fail,
+                        format!("template {template} (guest {whose}) is not usable: {e}"),
+                    );
                     continue;
                 }
             };
-            let listed = listing.iter().find(|i| {
-                i.get("vmid").and_then(Value::as_u64) == Some(u64::from(id))
-            });
+            let listed = listing
+                .iter()
+                .find(|i| i.get("vmid").and_then(Value::as_u64) == Some(u64::from(id)));
             match listed {
                 None => {
-                    push("template", Health::Fail, format!(
-                        "template {id} (guest {whose}) does not exist on the cluster"
-                    ));
+                    push(
+                        "template",
+                        Health::Fail,
+                        format!("template {id} (guest {whose}) does not exist on the cluster"),
+                    );
                     continue;
                 }
-                Some(item)
-                    if item.get("template").and_then(Value::as_u64).unwrap_or(0) != 1 =>
-                {
+                Some(item) if item.get("template").and_then(Value::as_u64).unwrap_or(0) != 1 => {
                     push("template", Health::Fail, format!(
                         "{id} (guest {whose}) exists but is not a template -- a clone would copy a machine somebody may be using"
                     ));
@@ -863,7 +895,10 @@ impl Provider for Proxmox {
                 }
                 Some(_) => {}
             }
-            match self.client.get(&format!("/nodes/{}/qemu/{id}/config", self.node())) {
+            match self
+                .client
+                .get(&format!("/nodes/{}/qemu/{id}/config", self.node()))
+            {
                 Ok(cfg) => {
                     let mut disks = 0;
                     let mut unpriceable = Vec::new();
@@ -878,9 +913,7 @@ impl Provider for Proxmox {
                                 let e = storages.entry(storage).or_default();
                                 *e = (*e).max(bytes);
                             }
-                            None if !spec.contains("media=cdrom") => {
-                                unpriceable.push(key.clone())
-                            }
+                            None if !spec.contains("media=cdrom") => unpriceable.push(key.clone()),
                             None => {}
                         }
                     }
@@ -900,10 +933,14 @@ impl Provider for Proxmox {
                         ));
                     }
                 }
-                Err(e) => push("template", Health::Fail, format!(
-                    "template {id} (guest {whose}): its configuration could not be read: {}",
-                    self.disambiguate(id, e)
-                )),
+                Err(e) => push(
+                    "template",
+                    Health::Fail,
+                    format!(
+                        "template {id} (guest {whose}): its configuration could not be read: {}",
+                        self.disambiguate(id, e)
+                    ),
+                ),
             }
         }
 
@@ -1173,7 +1210,6 @@ fn usable_addresses(data: &Value) -> Vec<IpAddr> {
 #[cfg(test)]
 mod tests;
 
-
 /// What a JSON value is, in one word, for an error message that has to explain
 /// why a reply could not be used.
 fn kind_of(v: &Value) -> &'static str {
@@ -1199,7 +1235,9 @@ fn is_disk_key(key: &str) -> bool {
     // efidisk, tpmstate and unused volumes are copied by a full clone just
     // as the bus disks are; leaving them out made every template look
     // slightly cheaper than it is (and an unused0 can be arbitrarily large).
-    for bus in ["virtio", "scsi", "sata", "ide", "efidisk", "tpmstate", "unused"] {
+    for bus in [
+        "virtio", "scsi", "sata", "ide", "efidisk", "tpmstate", "unused",
+    ] {
         if let Some(rest) = key.strip_prefix(bus) {
             return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
         }

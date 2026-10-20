@@ -23,10 +23,19 @@ use crate::provider::MachineRef;
 
 #[derive(Debug)]
 pub enum StoreError {
-    Io { path: PathBuf, source: io::Error },
-    Corrupt { path: PathBuf, message: String },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Corrupt {
+        path: PathBuf,
+        message: String,
+    },
     /// Another *live* process holds the lock and did not let go in time.
-    Locked { path: PathBuf, waited: Duration },
+    Locked {
+        path: PathBuf,
+        waited: Duration,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -68,9 +77,12 @@ mod epoch {
         )
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<SystemTime, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> std::result::Result<SystemTime, D::Error> {
         let secs = u64::deserialize(d)?;
-        from_secs_checked(secs).ok_or_else(|| serde::de::Error::custom("epoch seconds overflow SystemTime"))
+        from_secs_checked(secs)
+            .ok_or_else(|| serde::de::Error::custom("epoch seconds overflow SystemTime"))
     }
 }
 
@@ -374,7 +386,9 @@ impl Store {
             message: e.to_string(),
         })?;
 
-        let tmp = self.path.with_extension(format!("tmp.{}", std::process::id()));
+        let tmp = self
+            .path
+            .with_extension(format!("tmp.{}", std::process::id()));
         fs::write(&tmp, text.as_bytes()).map_err(|e| io_err(&tmp, e))?;
         fs::rename(&tmp, &self.path).map_err(|e| io_err(&self.path, e))
     }
@@ -447,9 +461,7 @@ impl Store {
                 // directory, a filesystem that does not carry locks. That is
                 // an I/O fault and must not be reported as contention, which
                 // would send somebody hunting a process that does not exist.
-                Err(fs::TryLockError::Error(e)) => {
-                    return Err(StoreError::Io { path, source: e })
-                }
+                Err(fs::TryLockError::Error(e)) => return Err(StoreError::Io { path, source: e }),
             }
 
             if SystemTime::now() >= deadline {

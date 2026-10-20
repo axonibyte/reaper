@@ -226,7 +226,10 @@ task_timeout = "5s"
     pub fn attached_disks(&self, machine: &str) -> BTreeMap<String, String> {
         let id: u32 = machine.parse().expect("handle this provider issued");
         self.with_state(|s| {
-            s.vms.get(&id).map(|v| v.extra_disks.clone()).unwrap_or_default()
+            s.vms
+                .get(&id)
+                .map(|v| v.extra_disks.clone())
+                .unwrap_or_default()
         })
     }
 
@@ -240,7 +243,9 @@ task_timeout = "5s"
     pub fn protect(&self, machine: &str) {
         let id: u32 = machine.parse().expect("handle this provider issued");
         self.with_state(|s| {
-            if let Some(vm) = s.vms.get_mut(&id) { vm.protection = true; }
+            if let Some(vm) = s.vms.get_mut(&id) {
+                vm.protection = true;
+            }
         });
     }
 
@@ -517,7 +522,10 @@ fn route(s: &mut State, method: &str, path: &str, body: &str) -> (u16, Value) {
         ("GET", ["nodes", _node, "qemu", id, "config"]) => match lookup(s, id) {
             // 403 for a machine that is gone, like every per-VM route: the
             // ACL check precedes the existence check on a pool-scoped token.
-            None => return (403, json!({"message": format!("Permission check failed (/vms/{id}, VM.Audit)")})),
+            None => (
+                403,
+                json!({"message": format!("Permission check failed (/vms/{id}, VM.Audit)")}),
+            ),
             Some(vm) => {
                 let mut cfg = json!({
                     "tags": vm.tags,
@@ -530,8 +538,7 @@ fn route(s: &mut State, method: &str, path: &str, body: &str) -> (u16, Value) {
                 if !vm.diskless {
                     // A boot disk, because a machine without one weighs nothing
                     // and a free-space check would have nothing to weigh.
-                    cfg["virtio0"] =
-                        json!(format!("{STORAGE}:vm-{id}-disk-0,iothread=1,size=8G"));
+                    cfg["virtio0"] = json!(format!("{STORAGE}:vm-{id}-disk-0,iothread=1,size=8G"));
                 }
                 for (bus, spec) in &vm.extra_disks {
                     cfg[bus] = json!(spec);
@@ -565,7 +572,10 @@ fn route(s: &mut State, method: &str, path: &str, body: &str) -> (u16, Value) {
             // 403 for a machine that is gone, like every per-VM route: the
             // ACL check precedes the existence check on a pool-scoped token.
             let Some(vm) = s.vms.get_mut(&key) else {
-                return (403, json!({"message": format!("Permission check failed (/vms/{key}, VM.Config.Options)")}));
+                return (
+                    403,
+                    json!({"message": format!("Permission check failed (/vms/{key}, VM.Config.Options)")}),
+                );
             };
             if let Some(t) = form.get("tags") {
                 vm.tags = t.clone();
@@ -599,7 +609,10 @@ fn route(s: &mut State, method: &str, path: &str, body: &str) -> (u16, Value) {
             // 403, not 404, exactly as the real API answers: the ACL check on
             // /vms/<id> precedes the existence check, and a machine that is
             // gone has no ACL entry. This distinction cost a bug.
-            None => (403, json!({"message": "Permission check failed (/vms/x, VM.Audit)"})),
+            None => (
+                403,
+                json!({"message": "Permission check failed (/vms/x, VM.Audit)"}),
+            ),
         },
 
         ("POST", ["nodes", _node, "qemu", id, "status", action]) => {
@@ -613,7 +626,10 @@ fn route(s: &mut State, method: &str, path: &str, body: &str) -> (u16, Value) {
             };
             // Same 403-before-existence rule as every per-VM route.
             let Some(vm) = s.vms.get_mut(&key) else {
-                return (403, json!({"message": format!("Permission check failed (/vms/{key}, VM.PowerMgmt)")}));
+                return (
+                    403,
+                    json!({"message": format!("Permission check failed (/vms/{key}, VM.PowerMgmt)")}),
+                );
             };
             vm.running = running;
             let t = new_task(s);
@@ -635,7 +651,10 @@ fn route(s: &mut State, method: &str, path: &str, body: &str) -> (u16, Value) {
             }
             if s.vms.remove(&key).is_none() {
                 // Same 403-before-existence rule as every per-VM route.
-                return (403, json!({"message": format!("Permission check failed (/vms/{key}, VM.Allocate)")}));
+                return (
+                    403,
+                    json!({"message": format!("Permission check failed (/vms/{key}, VM.Allocate)")}),
+                );
             }
             let t = new_task(s);
             (200, json!({ "data": t }))
@@ -661,7 +680,12 @@ fn route(s: &mut State, method: &str, path: &str, body: &str) -> (u16, Value) {
                 );
             }
             // Observed live: a machine that exists but is stopped.
-            if !s.vms.get(&id.parse::<u32>().unwrap_or(0)).map(|v| v.running).unwrap_or(false) {
+            if !s
+                .vms
+                .get(&id.parse::<u32>().unwrap_or(0))
+                .map(|v| v.running)
+                .unwrap_or(false)
+            {
                 return (500, json!({"message": format!("VM {id} is not running")}));
             }
             if s.agent_unavailable {
@@ -679,7 +703,10 @@ fn route(s: &mut State, method: &str, path: &str, body: &str) -> (u16, Value) {
             None => (404, json!({"errors": "no such task"})),
         },
 
-        _ => (404, json!({ "errors": format!("unrouted: {method} {path_only}") })),
+        _ => (
+            404,
+            json!({ "errors": format!("unrouted: {method} {path_only}") }),
+        ),
     }
 }
 

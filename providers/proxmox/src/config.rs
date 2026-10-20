@@ -193,7 +193,9 @@ fn check_endpoint(api: &str) -> Result<(), String> {
                 ))
             }
         }
-        other => Err(format!("[proxmox].api has scheme {other:?}; expected http or https")),
+        other => Err(format!(
+            "[proxmox].api has scheme {other:?}; expected http or https"
+        )),
     }
 }
 
@@ -234,7 +236,10 @@ pub fn read_token(path: &std::path::Path) -> Result<String, ConfigError> {
     let token = text.trim().to_string();
 
     if token.is_empty() {
-        return Err(ConfigError(format!("token file {} is empty", path.display())));
+        return Err(ConfigError(format!(
+            "token file {} is empty",
+            path.display()
+        )));
     }
     // Shape check only. Whether the credential is *accepted* is the server's
     // business, but a token missing its identifier will produce a 401 that

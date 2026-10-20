@@ -97,9 +97,9 @@ fn an_identifier_the_listing_cannot_see_is_stepped_over_rather_than_fatal() {
     pve.hide_from_listing(9001);
 
     let p = provider_for(&pve);
-    let m = p.create(&request("a-session", 1_700_000_000)).expect(
-        "a leftover configuration must cost this session an identifier, not the session",
-    );
+    let m = p
+        .create(&request("a-session", 1_700_000_000))
+        .expect("a leftover configuration must cost this session an identifier, not the session");
 
     assert_eq!(
         m.as_str(),
@@ -139,7 +139,8 @@ fn a_leftover_is_never_destroyed_on_the_strength_of_our_own_failed_clone() {
     pve.hide_from_listing(9001);
 
     let p = provider_for(&pve);
-    p.create(&request("a-session", 1_700_000_000)).expect("create");
+    p.create(&request("a-session", 1_700_000_000))
+        .expect("create");
 
     let leftover = pve.vm(9001).expect("the machine that was already there");
     assert_eq!(leftover.name, "somebody-elses");
@@ -180,8 +181,14 @@ fn a_range_full_of_leftovers_is_refused_with_the_identifiers_named() {
         panic!("a range that is entirely leftovers cannot produce a session");
     };
     let text = e.to_string();
-    assert!(text.contains("9001"), "the identifiers must be named: {text}");
-    assert!(text.contains("9008"), "all of them, not just the first: {text}");
+    assert!(
+        text.contains("9001"),
+        "the identifiers must be named: {text}"
+    );
+    assert!(
+        text.contains("9008"),
+        "all of them, not just the first: {text}"
+    );
 }
 
 #[test]
@@ -207,7 +214,9 @@ fn a_listing_that_cannot_be_read_is_not_an_empty_cluster() {
     assert!(e.to_string().contains("not a list"), "{e}");
     let calls = pve.calls();
     assert!(
-        !calls.iter().any(|(m, path)| m == "POST" && path.contains("/clone")),
+        !calls
+            .iter()
+            .any(|(m, path)| m == "POST" && path.contains("/clone")),
         "and the refusal must come before the clone: {calls:?}"
     );
 }
@@ -243,7 +252,9 @@ fn creating_clones_the_template_and_tags_it_with_an_expiry() {
     let pve = pve_with_template();
     let p = provider_for(&pve);
 
-    let m = p.create(&request("a-session", 1_700_000_000)).expect("create");
+    let m = p
+        .create(&request("a-session", 1_700_000_000))
+        .expect("create");
     let id: u32 = m.as_str().parse().expect("numeric identifier");
     assert!((9000..=9099).contains(&id));
     assert_ne!(id, 9000, "must not reuse the template's own identifier");
@@ -264,7 +275,10 @@ fn creating_tags_before_starting_and_does_not_start_at_all() {
     let m = p.create(&request("a-session", 1_700_000_000)).unwrap();
 
     let calls = pve.calls();
-    let clone_at = calls.iter().position(|(_, p)| p.contains("/clone")).expect("cloned");
+    let clone_at = calls
+        .iter()
+        .position(|(_, p)| p.contains("/clone"))
+        .expect("cloned");
     // The *write*, specifically. Reading the template's configuration to see
     // what a session will cost is also a /config request, and it happens first.
     let tagged_at = calls
@@ -290,9 +304,8 @@ fn a_machine_that_cannot_be_given_an_expiry_is_destroyed_rather_than_leaked() {
     let e = p.create(&request("a-session", 1_700_000_000)).unwrap_err();
     assert!(e.to_string().contains("has been destroyed"), "{e}");
 
-    let leftovers: Vec<u32> = pve.with_state(|s| {
-        s.vms.keys().copied().filter(|id| *id != 9000).collect()
-    });
+    let leftovers: Vec<u32> =
+        pve.with_state(|s| s.vms.keys().copied().filter(|id| *id != 9000).collect());
     assert!(leftovers.is_empty(), "leaked machines: {leftovers:?}");
 }
 
@@ -376,7 +389,8 @@ fn moving_an_expiry_preserves_tags_this_project_did_not_write() {
     });
     let p = provider_for(&pve);
 
-    p.set_expiry(&MachineRef::new("9001"), at(1_700_000_000)).unwrap();
+    p.set_expiry(&MachineRef::new("9001"), at(1_700_000_000))
+        .unwrap();
 
     let tags = tags::split(&pve.vm(9001).unwrap().tags)
         .into_iter()
@@ -385,7 +399,10 @@ fn moving_an_expiry_preserves_tags_this_project_did_not_write() {
     assert!(tags.contains(&"somebody-elses".to_string()), "{tags:?}");
     assert!(tags.contains(&"ephemeral".to_string()), "{tags:?}");
     assert!(tags.contains(&"expires-1700000000".to_string()), "{tags:?}");
-    assert!(!tags.contains(&"expires-1".to_string()), "stale expiry kept: {tags:?}");
+    assert!(
+        !tags.contains(&"expires-1".to_string()),
+        "stale expiry kept: {tags:?}"
+    );
 }
 
 // --- listing ---------------------------------------------------------------
@@ -394,11 +411,34 @@ fn moving_an_expiry_preserves_tags_this_project_did_not_write() {
 fn listing_reports_only_this_providers_machines() {
     let pve = pve_with_template();
     pve.with_state(|s| {
-        s.vms.insert(9001, Vm { name: "mine".into(), tags: "expires-1700000000".into(), running: true, pool: POOL.into(), ..Vm::default() });
+        s.vms.insert(
+            9001,
+            Vm {
+                name: "mine".into(),
+                tags: "expires-1700000000".into(),
+                running: true,
+                pool: POOL.into(),
+                ..Vm::default()
+            },
+        );
         // In range but another pool: not ours.
-        s.vms.insert(9002, Vm { name: "another-tenant".into(), pool: "someone/else".into(), ..Vm::default() });
+        s.vms.insert(
+            9002,
+            Vm {
+                name: "another-tenant".into(),
+                pool: "someone/else".into(),
+                ..Vm::default()
+            },
+        );
         // In our pool but outside the range: not ours either.
-        s.vms.insert(8100, Vm { name: "the-sweeper".into(), pool: POOL.into(), ..Vm::default() });
+        s.vms.insert(
+            8100,
+            Vm {
+                name: "the-sweeper".into(),
+                pool: POOL.into(),
+                ..Vm::default()
+            },
+        );
     });
     let p = provider_for(&pve);
 
@@ -418,7 +458,14 @@ fn a_machine_with_no_expiry_is_listed_with_none_rather_than_skipped() {
     // collect, and hiding it would hide the problem.
     let pve = MockPve::start();
     pve.with_state(|s| {
-        s.vms.insert(9001, Vm { name: "untagged".into(), pool: POOL.into(), ..Vm::default() });
+        s.vms.insert(
+            9001,
+            Vm {
+                name: "untagged".into(),
+                pool: POOL.into(),
+                ..Vm::default()
+            },
+        );
     });
     let p = provider_for(&pve);
 
@@ -433,7 +480,14 @@ fn a_machine_with_no_expiry_is_listed_with_none_rather_than_skipped() {
 fn starting_stopping_and_destroying_do_what_they_say() {
     let pve = MockPve::start();
     pve.with_state(|s| {
-        s.vms.insert(9001, Vm { name: "a-session".into(), pool: POOL.into(), ..Vm::default() });
+        s.vms.insert(
+            9001,
+            Vm {
+                name: "a-session".into(),
+                pool: POOL.into(),
+                ..Vm::default()
+            },
+        );
     });
     let p = provider_for(&pve);
     let m = MachineRef::new("9001");
@@ -465,13 +519,23 @@ fn a_task_that_never_finishes_times_out_and_destroys_nothing() {
     let pve = MockPve::start();
     pve.with_state(|s| {
         s.tasks_never_finish = true;
-        s.vms.insert(9001, Vm { name: "a-session".into(), pool: POOL.into(), ..Vm::default() });
+        s.vms.insert(
+            9001,
+            Vm {
+                name: "a-session".into(),
+                pool: POOL.into(),
+                ..Vm::default()
+            },
+        );
     });
     let p = provider_for(&pve);
 
     let e = p.start(&MachineRef::new("9001")).unwrap_err();
     assert!(matches!(e, ProviderError::Timeout(_)), "{e}");
-    assert!(pve.vm(9001).is_some(), "a timeout must not destroy anything");
+    assert!(
+        pve.vm(9001).is_some(),
+        "a timeout must not destroy anything"
+    );
     assert!(
         !pve.paths().iter().any(|p| p.starts_with("DELETE")),
         "nothing may be deleted on a timeout"
@@ -485,7 +549,14 @@ fn an_address_is_none_until_the_guest_agent_answers() {
     let pve = MockPve::start();
     pve.with_state(|s| {
         s.agent_unavailable = true;
-        s.vms.insert(9001, Vm { name: "a-session".into(), pool: POOL.into(), ..Vm::default() });
+        s.vms.insert(
+            9001,
+            Vm {
+                name: "a-session".into(),
+                pool: POOL.into(),
+                ..Vm::default()
+            },
+        );
     });
     let p = provider_for(&pve);
 
@@ -498,7 +569,15 @@ fn an_address_is_none_until_the_guest_agent_answers() {
 fn loopback_and_link_local_addresses_are_skipped() {
     let pve = MockPve::start();
     pve.with_state(|s| {
-        s.vms.insert(9001, Vm { name: "a-session".into(), pool: POOL.into(), running: true, ..Vm::default() });
+        s.vms.insert(
+            9001,
+            Vm {
+                name: "a-session".into(),
+                pool: POOL.into(),
+                running: true,
+                ..Vm::default()
+            },
+        );
         s.agent_interfaces = Some(json!([
             {"name": "lo", "ip-addresses": [
                 {"ip-address": "127.0.0.1", "ip-address-type": "ipv4"},
@@ -524,7 +603,15 @@ fn loopback_and_link_local_addresses_are_skipped() {
 fn an_ipv4_address_is_preferred_over_ipv6() {
     let pve = MockPve::start();
     pve.with_state(|s| {
-        s.vms.insert(9001, Vm { name: "a-session".into(), pool: POOL.into(), running: true, ..Vm::default() });
+        s.vms.insert(
+            9001,
+            Vm {
+                name: "a-session".into(),
+                pool: POOL.into(),
+                running: true,
+                ..Vm::default()
+            },
+        );
         s.agent_interfaces = Some(json!([
             {"name": "eth0", "ip-addresses": [
                 {"ip-address": "2001:db8::5", "ip-address-type": "ipv6"},
@@ -567,7 +654,10 @@ fn the_token_is_sent_on_every_request() {
 #[test]
 fn session_names_are_bent_into_something_the_api_accepts() {
     // Rather than reject a name a person chose.
-    assert_eq!(sanitize_name("my-project/some-os 26.04"), "my-project-some-os-26-04");
+    assert_eq!(
+        sanitize_name("my-project/some-os 26.04"),
+        "my-project-some-os-26-04"
+    );
     assert_eq!(sanitize_name("UPPER_case"), "upper-case");
     assert_eq!(sanitize_name("---"), "reaper");
     assert_eq!(sanitize_name(""), "reaper");
@@ -582,14 +672,32 @@ fn identifier_allocation_avoids_machines_this_provider_cannot_see() {
     // the filtered view would collide with something already there.
     let pve = pve_with_template();
     pve.with_state(|s| {
-        s.vms.insert(9001, Vm { name: "another-tenant".into(), pool: "someone/else".into(), ..Vm::default() });
-        s.vms.insert(9002, Vm { name: "another-template".into(), template: true, pool: "someone/else".into(), ..Vm::default() });
+        s.vms.insert(
+            9001,
+            Vm {
+                name: "another-tenant".into(),
+                pool: "someone/else".into(),
+                ..Vm::default()
+            },
+        );
+        s.vms.insert(
+            9002,
+            Vm {
+                name: "another-template".into(),
+                template: true,
+                pool: "someone/else".into(),
+                ..Vm::default()
+            },
+        );
     });
     let p = provider_for(&pve);
 
     let m = p.create(&request("a-session", 1)).expect("create");
     let id: u32 = m.as_str().parse().unwrap();
-    assert_eq!(id, 9003, "should skip 9000 (template), 9001 and 9002; got {id}");
+    assert_eq!(
+        id, 9003,
+        "should skip 9000 (template), 9001 and 9002; got {id}"
+    );
 }
 
 // --- configuration ---------------------------------------------------------
@@ -728,14 +836,20 @@ fn a_token_others_can_read_is_refused() {
     for mode in [0o644, 0o640, 0o604, 0o666] {
         let p = token_file(&format!("mode{mode:o}"), "cal@pve!x=secret", mode);
         let e = crate::config::read_token(&p).expect_err("mode {mode:o} should be refused");
-        assert!(e.to_string().contains("readable by others"), "{mode:o}: {e}");
+        assert!(
+            e.to_string().contains("readable by others"),
+            "{mode:o}: {e}"
+        );
     }
 }
 
 #[test]
 fn a_token_only_its_owner_can_read_is_accepted() {
     let p = token_file("ok", "cal@pve!harness=s3cret\n", 0o600);
-    assert_eq!(crate::config::read_token(&p).unwrap(), "cal@pve!harness=s3cret");
+    assert_eq!(
+        crate::config::read_token(&p).unwrap(),
+        "cal@pve!harness=s3cret"
+    );
 }
 
 #[test]
@@ -750,7 +864,10 @@ fn a_token_that_is_not_shaped_like_a_credential_is_refused() {
         ("internal space", "cal@pve!harness= secret"),
     ] {
         let p = token_file(label, body, 0o600);
-        assert!(crate::config::read_token(&p).is_err(), "{label} should be refused");
+        assert!(
+            crate::config::read_token(&p).is_err(),
+            "{label} should be refused"
+        );
     }
 }
 
@@ -780,7 +897,8 @@ fn the_disk_is_attached_in_the_same_call_as_the_expiry() {
     // unrecoverable state in the design.
     let pve = pve_with_template();
     let p = provider_for(&pve);
-    p.create(&request("a-session", 1_700_000_000)).expect("create");
+    p.create(&request("a-session", 1_700_000_000))
+        .expect("create");
 
     // Writes only. Reading the template's configuration to price the session
     // is a /config request too, and it is not what this is counting.
@@ -789,7 +907,10 @@ fn the_disk_is_attached_in_the_same_call_as_the_expiry() {
         .iter()
         .filter(|(m, p)| m == "PUT" && p.ends_with("/config"))
         .count();
-    assert_eq!(config_writes, 1, "expected one config write, saw {config_writes}");
+    assert_eq!(
+        config_writes, 1,
+        "expected one config write, saw {config_writes}"
+    );
 }
 
 #[test]
@@ -848,7 +969,11 @@ fn the_disk_slot_is_configurable() {
 
     let m = p.create(&request("a-session", 1)).expect("create");
     let disks = pve.attached_disks(m.as_str());
-    assert_eq!(disks.get("scsi3").map(String::as_str), Some("s:64"), "{disks:?}");
+    assert_eq!(
+        disks.get("scsi3").map(String::as_str),
+        Some("s:64"),
+        "{disks:?}"
+    );
 }
 
 #[test]
@@ -857,7 +982,14 @@ fn destroying_also_clears_disks_a_failed_create_could_have_left() {
     // should not disagree about what destroying a machine means.
     let pve = MockPve::start();
     pve.with_state(|s| {
-        s.vms.insert(9001, Vm { name: "a-session".into(), pool: POOL.into(), ..Vm::default() });
+        s.vms.insert(
+            9001,
+            Vm {
+                name: "a-session".into(),
+                pool: POOL.into(),
+                ..Vm::default()
+            },
+        );
     });
     let p = provider_for(&pve);
 
@@ -866,7 +998,9 @@ fn destroying_also_clears_disks_a_failed_create_could_have_left() {
     let paths = pve.paths();
     let deletes: Vec<&String> = paths.iter().filter(|p| p.contains("/qemu/9001")).collect();
     assert!(
-        deletes.iter().any(|p| p.contains("destroy-unreferenced-disks=1")),
+        deletes
+            .iter()
+            .any(|p| p.contains("destroy-unreferenced-disks=1")),
         "unreferenced disks must be cleared too: {deletes:?}"
     );
     assert!(pve.vm(9001).is_none(), "the machine should be gone");
@@ -909,7 +1043,10 @@ fn protection_is_cleared_before_the_machine_is_ever_started() {
         .position(|(m, p)| m == "PUT" && p.ends_with("/config"))
         .expect("configured");
     let started = paths.iter().position(|x| x.contains("/status/start"));
-    assert!(started.is_none(), "create must not start the machine: {paths:?}");
+    assert!(
+        started.is_none(),
+        "create must not start the machine: {paths:?}"
+    );
     assert_eq!(
         pve.calls()
             .iter()
@@ -937,16 +1074,31 @@ fn destroying_a_running_machine_stops_it_first() {
     // on every live session -- which is the only kind that matters.
     let pve = MockPve::start();
     pve.with_state(|s| {
-        s.vms.insert(9001, Vm { name: "a-session".into(), running: true, pool: POOL.into(), ..Vm::default() });
+        s.vms.insert(
+            9001,
+            Vm {
+                name: "a-session".into(),
+                running: true,
+                pool: POOL.into(),
+                ..Vm::default()
+            },
+        );
     });
     let p = provider_for(&pve);
 
-    p.destroy(&MachineRef::new("9001")).expect("destroy must handle a running machine");
+    p.destroy(&MachineRef::new("9001"))
+        .expect("destroy must handle a running machine");
     assert!(pve.vm(9001).is_none(), "the machine should be gone");
 
     let paths = pve.paths();
-    let stopped = paths.iter().position(|x| x.contains("/status/stop")).expect("asked it to stop");
-    let deleted = paths.iter().rposition(|x| x.contains("/qemu/9001?")).expect("deleted");
+    let stopped = paths
+        .iter()
+        .position(|x| x.contains("/status/stop"))
+        .expect("asked it to stop");
+    let deleted = paths
+        .iter()
+        .rposition(|x| x.contains("/qemu/9001?"))
+        .expect("deleted");
     assert!(stopped < deleted, "stop must precede delete: {paths:?}");
 }
 
@@ -954,7 +1106,15 @@ fn destroying_a_running_machine_stops_it_first() {
 fn destroying_a_stopped_machine_does_not_bother_stopping_it() {
     let pve = MockPve::start();
     pve.with_state(|s| {
-        s.vms.insert(9001, Vm { name: "a-session".into(), running: false, pool: POOL.into(), ..Vm::default() });
+        s.vms.insert(
+            9001,
+            Vm {
+                name: "a-session".into(),
+                running: false,
+                pool: POOL.into(),
+                ..Vm::default()
+            },
+        );
     });
     let p = provider_for(&pve);
     p.destroy(&MachineRef::new("9001")).unwrap();
@@ -1016,7 +1176,10 @@ fn a_session_that_would_fill_the_storage_is_refused_before_anything_is_made() {
 
     let message = err.to_string();
     assert!(message.contains("free"), "{message}");
-    assert!(message.contains("min_free_gb"), "should say how to override: {message}");
+    assert!(
+        message.contains("min_free_gb"),
+        "should say how to override: {message}"
+    );
 
     // And nothing was created on the way to finding out.
     assert!(
@@ -1063,7 +1226,10 @@ fn a_storage_that_will_not_say_how_full_it_is_does_not_stop_a_session() {
 
     let mut req = request("a-session", 1_700_000_000);
     req.data_disk_gb = Some(64);
-    assert!(p.create(&req).is_ok(), "an unreadable storage must not block a session");
+    assert!(
+        p.create(&req).is_ok(),
+        "an unreadable storage must not block a session"
+    );
 }
 
 #[test]
@@ -1194,7 +1360,8 @@ fn a_third_partys_expires_tag_is_not_ours_to_delete() {
     // with_expiry deleted anything starting "expires-", including forms
     // expiry_of() itself refuses to read. What this module cannot read it
     // may not delete.
-    let out = crate::tags::with_expiry("expires-soon;owner-x;expires-1700000000", at(1_800_000_000));
+    let out =
+        crate::tags::with_expiry("expires-soon;owner-x;expires-1700000000", at(1_800_000_000));
     assert!(out.contains("expires-soon"), "{out}");
     assert!(out.contains("owner-x"), "{out}");
     assert!(out.contains("expires-1800000000"), "{out}");
@@ -1333,7 +1500,10 @@ fn a_double_failure_names_the_machine_to_destroy_by_hand() {
     let e = p.create(&request("a-session", 1)).unwrap_err();
     let msg = e.to_string();
     assert!(msg.contains("by hand"), "{msg}");
-    assert!(msg.contains("9001"), "name the machine, not just the problem: {msg}");
+    assert!(
+        msg.contains("9001"),
+        "name the machine, not just the problem: {msg}"
+    );
 }
 
 #[test]
@@ -1352,7 +1522,11 @@ fn a_v6_only_guest_still_yields_its_address() {
     let m = p.create(&request("a-session", 1)).expect("create");
     p.start(&m).expect("start");
     let a = p.address(&m).expect("query").expect("an address");
-    assert_eq!(a.to_string(), "2001:db8::7", "global v6 beats loopback and link-local");
+    assert_eq!(
+        a.to_string(),
+        "2001:db8::7",
+        "global v6 beats loopback and link-local"
+    );
 }
 
 #[test]
@@ -1413,10 +1587,7 @@ fn from_table_refuses_what_its_pieces_refuse() {
     let Err(e) = Proxmox::from_table(&bad) else {
         panic!("a table with no node, pool or range should be refused");
     };
-    assert!(
-        matches!(e, reaper_core::ProviderError::Config(_)),
-        "{e}"
-    );
+    assert!(matches!(e, reaper_core::ProviderError::Config(_)), "{e}");
 }
 
 #[test]
@@ -1459,7 +1630,10 @@ fn starting_or_stopping_a_gone_machine_says_gone() {
     let p = provider_for(&pve);
     let m = p.create(&request("a-session", 1)).expect("create");
     pve.collect(m.as_str());
-    for (what, e) in [("start", p.start(&m).unwrap_err()), ("stop", p.stop(&m).unwrap_err())] {
+    for (what, e) in [
+        ("start", p.start(&m).unwrap_err()),
+        ("stop", p.stop(&m).unwrap_err()),
+    ] {
         assert!(
             matches!(e, reaper_core::ProviderError::NotFound(_)),
             "{what}: {e}"
@@ -1525,10 +1699,19 @@ fn a_refused_credential_is_one_fail_not_a_pile() {
     let pve = pve_with_template();
     pve.with_state(|s| s.unauthorized = true);
     let p = provider_for(&pve);
-    let f = p.diagnose(&[RegisteredGuest { name: "g".into(), template: "9000".into() }]);
+    let f = p.diagnose(&[RegisteredGuest {
+        name: "g".into(),
+        template: "9000".into(),
+    }]);
     assert_eq!(health_count(&f, Health::Fail), 1, "{f:?}");
     assert!(find(&f, "api")[0].detail.contains("refuses the credential"));
-    assert!(f.iter().filter(|x| x.detail.starts_with("skipped:")).count() >= 3, "{f:?}");
+    assert!(
+        f.iter()
+            .filter(|x| x.detail.starts_with("skipped:"))
+            .count()
+            >= 3,
+        "{f:?}"
+    );
 }
 
 #[test]
@@ -1536,7 +1719,10 @@ fn an_unreachable_api_is_one_fail_not_a_pile() {
     let pve = pve_with_template();
     let p = provider_for(&pve);
     drop(pve);
-    let f = p.diagnose(&[RegisteredGuest { name: "g".into(), template: "9000".into() }]);
+    let f = p.diagnose(&[RegisteredGuest {
+        name: "g".into(),
+        template: "9000".into(),
+    }]);
     assert_eq!(health_count(&f, Health::Fail), 1, "{f:?}");
     assert!(find(&f, "api")[0].detail.contains("did not answer"));
 }
@@ -1546,11 +1732,18 @@ fn a_missing_template_is_named_with_its_guests() {
     let pve = pve_with_template();
     pve.collect("9000");
     let p = provider_for(&pve);
-    let f = p.diagnose(&[RegisteredGuest { name: "a-guest".into(), template: "9000".into() }]);
+    let f = p.diagnose(&[RegisteredGuest {
+        name: "a-guest".into(),
+        template: "9000".into(),
+    }]);
     let t = find(&f, "template");
     assert_eq!(t[0].health, Health::Fail, "{f:?}");
     assert!(t[0].detail.contains("does not exist"));
-    assert!(t[0].detail.contains("a-guest"), "the guest is named: {}", t[0].detail);
+    assert!(
+        t[0].detail.contains("a-guest"),
+        "the guest is named: {}",
+        t[0].detail
+    );
 }
 
 #[test]
@@ -1560,8 +1753,14 @@ fn a_machine_that_is_not_a_template_is_refused_as_one() {
         s.vms.get_mut(&9000).unwrap().template = false;
     });
     let p = provider_for(&pve);
-    let f = p.diagnose(&[RegisteredGuest { name: "g".into(), template: "9000".into() }]);
-    assert!(find(&f, "template")[0].detail.contains("not a template"), "{f:?}");
+    let f = p.diagnose(&[RegisteredGuest {
+        name: "g".into(),
+        template: "9000".into(),
+    }]);
+    assert!(
+        find(&f, "template")[0].detail.contains("not a template"),
+        "{f:?}"
+    );
     assert_eq!(find(&f, "template")[0].health, Health::Fail);
 }
 
@@ -1570,7 +1769,10 @@ fn a_diskless_template_cannot_boot_a_clone_and_says_so() {
     let pve = pve_with_template();
     pve.with_state(|s| s.vms.get_mut(&9000).unwrap().diskless = true);
     let p = provider_for(&pve);
-    let f = p.diagnose(&[RegisteredGuest { name: "g".into(), template: "9000".into() }]);
+    let f = p.diagnose(&[RegisteredGuest {
+        name: "g".into(),
+        template: "9000".into(),
+    }]);
     assert_eq!(find(&f, "template")[0].health, Health::Fail, "{f:?}");
     assert!(find(&f, "template")[0].detail.contains("no priceable disk"));
 }
@@ -1580,7 +1782,10 @@ fn a_storage_under_the_floor_fails_the_diagnosis() {
     let pve = pve_with_template();
     pve.storage_named_has("stand-in-storage", 2 * 1024 * 1024 * 1024); // template's home, tiny
     let p = provider_for(&pve);
-    let f = p.diagnose(&[RegisteredGuest { name: "g".into(), template: "9000".into() }]);
+    let f = p.diagnose(&[RegisteredGuest {
+        name: "g".into(),
+        template: "9000".into(),
+    }]);
     let bad: Vec<_> = find(&f, "storage")
         .into_iter()
         .filter(|x| x.health == Health::Fail)
@@ -1594,23 +1799,34 @@ fn pool_hygiene_names_the_machines_that_want_a_human() {
     let pve = pve_with_template();
     pve.with_state(|s| {
         // Untagged, in pool and range: nothing will ever collect it.
-        s.vms.insert(9030, Vm {
-            name: "somebody-built-this".into(),
-            pool: POOL.into(),
-            ..Vm::default()
-        });
+        s.vms.insert(
+            9030,
+            Vm {
+                name: "somebody-built-this".into(),
+                pool: POOL.into(),
+                ..Vm::default()
+            },
+        );
         // Expired an hour ago, sweep_within is 15m: the sweeper is absent.
-        s.vms.insert(9031, Vm {
-            name: "long-dead".into(),
-            pool: POOL.into(),
-            tags: "expires-1000000000".into(),
-            ..Vm::default()
-        });
+        s.vms.insert(
+            9031,
+            Vm {
+                name: "long-dead".into(),
+                pool: POOL.into(),
+                tags: "expires-1000000000".into(),
+                ..Vm::default()
+            },
+        );
     });
     let p = provider_for(&pve);
-    let f = p.diagnose(&[RegisteredGuest { name: "g".into(), template: "9000".into() }]);
+    let f = p.diagnose(&[RegisteredGuest {
+        name: "g".into(),
+        template: "9000".into(),
+    }]);
     assert!(
-        find(&f, "pool hygiene").iter().any(|x| x.detail.contains("9030")),
+        find(&f, "pool hygiene")
+            .iter()
+            .any(|x| x.detail.contains("9030")),
         "{f:?}"
     );
     let sweeper = find(&f, "sweeper");
@@ -1627,14 +1843,20 @@ fn an_expired_machine_inside_the_window_is_the_sweepers_to_take() {
         .as_secs()
         - 60;
     pve.with_state(|s| {
-        s.vms.insert(9032, Vm {
-            name: "just-expired".into(),
-            pool: POOL.into(),
-            tags: format!("expires-{recent}"),
-            ..Vm::default()
-        });
+        s.vms.insert(
+            9032,
+            Vm {
+                name: "just-expired".into(),
+                pool: POOL.into(),
+                tags: format!("expires-{recent}"),
+                ..Vm::default()
+            },
+        );
     });
     let p = provider_for(&pve);
-    let f = p.diagnose(&[RegisteredGuest { name: "g".into(), template: "9000".into() }]);
+    let f = p.diagnose(&[RegisteredGuest {
+        name: "g".into(),
+        template: "9000".into(),
+    }]);
     assert_eq!(find(&f, "sweeper")[0].health, Health::Ok, "{f:?}");
 }

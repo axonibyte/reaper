@@ -298,7 +298,10 @@ const EXEC_PROBE_GUARD: &str = "if [ -n \"${REAPER_EXEC_PROBE:-}\" ]; then exit 
 /// exec, since nothing on this side can close somebody else's descriptor.
 fn write_executable(path: &Path, body: &str) {
     let (shebang, rest) = body.split_once('\n').expect("a stand-in needs a shebang");
-    assert!(shebang.starts_with("#!"), "a stand-in needs a shebang: {shebang:?}");
+    assert!(
+        shebang.starts_with("#!"),
+        "a stand-in needs a shebang: {shebang:?}"
+    );
     write(
         path,
         &format!("{shebang}\n{EXEC_PROBE_GUARD}{rest}"),
@@ -326,7 +329,10 @@ fn a_session_goes_up_gets_listed_renewed_and_comes_back_down() {
     let h = Harness::new("lifecycle");
 
     let up = h.ok(&["up"]);
-    assert!(up.contains("192.0.2.42"), "up should report the address: {up}");
+    assert!(
+        up.contains("192.0.2.42"),
+        "up should report the address: {up}"
+    );
     let created = h.machines();
     assert_eq!(created.len(), 1, "exactly one machine: {created:?}");
     let id = created[0].clone();
@@ -370,7 +376,11 @@ fn a_second_up_reuses_the_live_session_rather_than_making_another() {
 
     let again = h.ok(&["up"]);
     assert!(again.contains("reusing"), "{again}");
-    assert_eq!(h.machines(), after_first, "a second up must not create more");
+    assert_eq!(
+        h.machines(),
+        after_first,
+        "a second up must not create more"
+    );
 
     h.ok(&["down"]);
 }
@@ -395,7 +405,10 @@ cmd = "make check"
 
     let err = h.fails(&["up"]);
     assert!(err.contains("never-registered"), "{err}");
-    assert!(err.contains("a-guest"), "should list what is registered: {err}");
+    assert!(
+        err.contains("a-guest"),
+        "should list what is registered: {err}"
+    );
     assert!(h.machines().is_empty(), "nothing may have been created");
 }
 
@@ -419,7 +432,11 @@ fn the_concurrency_cap_is_enforced() {
 
     let err = h.fails(&["up"]);
     assert!(err.contains("max_concurrent"), "{err}");
-    assert_eq!(h.machines().len(), 2, "the third must not have been created");
+    assert_eq!(
+        h.machines().len(),
+        2,
+        "the third must not have been created"
+    );
 
     h.ok(&["down", "--all"]);
 }
@@ -528,7 +545,10 @@ fn up_delivers_the_runner_and_builds_the_storage_before_declaring_ready() {
 
     // The runner is shipped, not installed into a template.
     let shipped = h.uploaded();
-    assert!(shipped.contains("firstboot"), "runner not uploaded: {shipped:.80}");
+    assert!(
+        shipped.contains("firstboot"),
+        "runner not uploaded: {shipped:.80}"
+    );
     assert_eq!(
         shipped,
         include_str!("../../runner/runner.sh"),
@@ -561,7 +581,10 @@ fn a_session_whose_storage_cannot_be_built_is_not_reported_as_ready() {
     assert!(err.contains("firstboot"), "{err}");
     // The upload succeeded, so the failure really is the storage step and not
     // an earlier one wearing its name.
-    assert!(!h.uploaded().is_empty(), "the runner should still have been delivered");
+    assert!(
+        !h.uploaded().is_empty(),
+        "the runner should still have been delivered"
+    );
 
     // The machine still exists and still carries its expiry, so nothing is
     // leaked -- and the session is recorded, so `down` can clear it.
@@ -629,7 +652,10 @@ fn a_sync_pushes_the_tree_and_brings_results_back() {
     let push = lines[0];
     assert!(push.contains("--delete"), "{push}");
     assert!(push.contains("--exclude=/out/"), "{push}");
-    assert!(push.contains("--exclude=/scratch/"), "the tenant's own: {push}");
+    assert!(
+        push.contains("--exclude=/scratch/"),
+        "the tenant's own: {push}"
+    );
     assert!(
         push.contains("192.0.2.42:/a-pool/work/a-project/"),
         "the runner said where the workspace is: {push}"
@@ -642,7 +668,10 @@ fn a_sync_pushes_the_tree_and_brings_results_back() {
         !pull.contains("--delete"),
         "the results channel must never delete: {pull}"
     );
-    assert!(pull.contains("192.0.2.42:/a-pool/work/a-project/out/"), "{pull}");
+    assert!(
+        pull.contains("192.0.2.42:/a-pool/work/a-project/out/"),
+        "{pull}"
+    );
 
     h.ok(&["down"]);
 }
@@ -767,8 +796,14 @@ fn every_declared_image_is_fetched_when_a_session_first_comes_up() {
     let ssh = h.log("ssh.log");
     // The toolchain as well as the tenant's own stack: both were declared, both
     // are needed, and a digest already in the store costs nothing to ask for.
-    assert!(ssh.contains("pull docker.io/library/db@sha256:bbbb"), "{ssh}");
-    assert!(ssh.contains("docker.io/library/toolchain@sha256:aaaa"), "{ssh}");
+    assert!(
+        ssh.contains("pull docker.io/library/db@sha256:bbbb"),
+        "{ssh}"
+    );
+    assert!(
+        ssh.contains("docker.io/library/toolchain@sha256:aaaa"),
+        "{ssh}"
+    );
 
     h.ok(&["down"]);
 }
@@ -785,7 +820,10 @@ fn a_session_that_cannot_pre_fetch_is_still_a_usable_session() {
     write(&h.dir.join("ssh.fail"), "reaper-runner.sh pull", None);
 
     let out = h.ok(&["up"]);
-    assert!(out.contains("192.0.2.42"), "the session must still come up: {out}");
+    assert!(
+        out.contains("192.0.2.42"),
+        "the session must still come up: {out}"
+    );
     assert_eq!(h.machines().len(), 1);
 
     let _ = std::fs::remove_file(h.dir.join("ssh.fail"));
@@ -822,7 +860,11 @@ fn a_session_that_was_never_synced_is_not_asked_for_results() {
     h.forget_logs();
 
     h.ok(&["down"]);
-    assert_eq!(h.log("rsync.log"), "", "nothing to collect, so nothing tried");
+    assert_eq!(
+        h.log("rsync.log"),
+        "",
+        "nothing to collect, so nothing tried"
+    );
     assert!(h.machines().is_empty());
 }
 
@@ -864,12 +906,19 @@ fn up_waits_for_a_machine_that_answers_not_merely_one_with_an_address() {
     write(&h.dir.join("ssh.refuse-times"), "3", None);
 
     let out = h.ok(&["up"]);
-    assert!(out.contains("192.0.2.42"), "it should get there in the end: {out}");
+    assert!(
+        out.contains("192.0.2.42"),
+        "it should get there in the end: {out}"
+    );
     assert!(
         out.contains("waiting"),
         "and should say what it is waiting on rather than sitting silent: {out}"
     );
-    assert_eq!(h.machines().len(), 1, "and must not create a second machine");
+    assert_eq!(
+        h.machines().len(),
+        1,
+        "and must not create a second machine"
+    );
 
     // The refusals were consumed rather than ignored.
     let left = std::fs::read_to_string(h.dir.join("ssh.refuse-times")).unwrap();
@@ -899,7 +948,10 @@ fn a_machine_that_never_answers_is_left_tagged_rather_than_torn_down() {
     // want to look at.
     assert_eq!(h.machines().len(), 1);
     let tags = h.hypervisor.tags_of(&h.machines()[0]);
-    assert!(tags.contains("expires-"), "must still be collectable: {tags:?}");
+    assert!(
+        tags.contains("expires-"),
+        "must still be collectable: {tags:?}"
+    );
 
     let _ = std::fs::remove_file(h.dir.join("ssh.refuse-times"));
     h.ok(&["down"]);
@@ -954,7 +1006,10 @@ cmd = "make check"
     // was taken down when it was not.
     h.ok(&["renew", "--manifest", "other.toml"]);
     h.ok(&["down", "--manifest", "other.toml"]);
-    assert!(h.machines().is_empty(), "down must have acted on the right project");
+    assert!(
+        h.machines().is_empty(),
+        "down must have acted on the right project"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,7 +1101,10 @@ fn snapshot_names_a_point() {
 
     h.ok(&["snapshot", "mid"]);
     let ssh = h.log("ssh.log");
-    assert!(ssh.contains("snapshot --dataset state --name 'mid'"), "{ssh}");
+    assert!(
+        ssh.contains("snapshot --dataset state --name 'mid'"),
+        "{ssh}"
+    );
     // Not --if-absent: an explicit name is a deliberate act, and silently
     // keeping an older point of the same name would be the wrong answer.
     assert!(!ssh.contains("--if-absent"), "{ssh}");
@@ -1076,7 +1134,8 @@ fn the_reset_trigger_is_started_with_a_session_that_wants_one() {
 
     h.ok(&["up"]);
     assert!(
-        h.log("ssh.log").contains("control --project a-project start"),
+        h.log("ssh.log")
+            .contains("control --project a-project start"),
         "{}",
         h.log("ssh.log")
     );
@@ -1097,7 +1156,6 @@ fn a_session_that_cannot_roll_anything_back_starts_no_trigger() {
     );
     h.ok(&["down"]);
 }
-
 
 // ---------------------------------------------------------------------------
 // Phase 5: the loop as one verb
@@ -1168,7 +1226,11 @@ fn the_first_test_on_a_session_does_not_reset() {
         h.log("ssh.log")
     );
     // But the run still happened, and still took the snapshot.
-    assert!(h.log("ssh.log").contains("snapshot --dataset state"), "{}", h.log("ssh.log"));
+    assert!(
+        h.log("ssh.log").contains("snapshot --dataset state"),
+        "{}",
+        h.log("ssh.log")
+    );
 
     h.ok(&["down"]);
 }
@@ -1190,7 +1252,11 @@ fn test_skips_the_steps_a_project_does_not_have() {
         h.log("ssh.log")
     );
     // And the run still ran, which is the whole point of the verb.
-    assert!(h.log("ssh.log").contains("exec --project"), "{}", h.log("ssh.log"));
+    assert!(
+        h.log("ssh.log").contains("exec --project"),
+        "{}",
+        h.log("ssh.log")
+    );
 
     h.ok(&["down"]);
 }
@@ -1203,7 +1269,11 @@ fn a_failing_step_stops_the_ones_after_it() {
     h.ok(&["up"]);
     h.forget_logs();
     // Break the build. Nothing after it should be attempted.
-    write(&h.dir.join("ssh.fail"), "--image docker.io/library/toolchain", None);
+    write(
+        &h.dir.join("ssh.fail"),
+        "--image docker.io/library/toolchain",
+        None,
+    );
 
     h.fails(&["test"]);
     let ssh = h.log("ssh.log");
@@ -1215,7 +1285,6 @@ fn a_failing_step_stops_the_ones_after_it() {
     let _ = std::fs::remove_file(h.dir.join("ssh.fail"));
     h.ok(&["down"]);
 }
-
 
 #[test]
 fn the_cap_counts_the_cluster_and_not_just_this_workstation() {
@@ -1252,7 +1321,8 @@ fn test_can_reset_to_a_named_point() {
     let out = h.ok(&["test", "--to", "after-stack-up"]);
     assert!(out.contains("reset to after-stack-up"), "{out}");
     assert!(
-        h.log("ssh.log").contains("rollback --dataset state --name 'after-stack-up'"),
+        h.log("ssh.log")
+            .contains("rollback --dataset state --name 'after-stack-up'"),
         "{}",
         h.log("ssh.log")
     );
@@ -1273,7 +1343,10 @@ fn a_named_point_that_does_not_exist_is_an_error_not_a_skip() {
 
     let err = h.fails(&["test", "--to", "no-such-point"]);
     assert!(err.contains("no-such-point"), "{err}");
-    assert!(err.contains("REAPER_CONTROL/snapshot"), "should name both ways to make one: {err}");
+    assert!(
+        err.contains("REAPER_CONTROL/snapshot"),
+        "should name both ways to make one: {err}"
+    );
     // The build legitimately ran -- it comes before the reset step. What must
     // not have happened is the *run*, which is the one that would have gone
     // against whatever state was lying about.
@@ -1322,7 +1395,9 @@ impl Harness {
     fn add_guest(&self, name: &str) {
         let template = self.hypervisor.add_template(POOL);
         let mut cfg = std::fs::read_to_string(self.dir.join("config.toml")).unwrap();
-        cfg.push_str(&format!("\n[guests.\"{name}\"]\ntemplate = \"{template}\"\n"));
+        cfg.push_str(&format!(
+            "\n[guests.\"{name}\"]\ntemplate = \"{template}\"\n"
+        ));
         std::fs::write(self.dir.join("config.toml"), cfg).unwrap();
     }
 }
@@ -1385,10 +1460,7 @@ cmd = "make check"
 
     h.ok(&["up"]);
     let out = h.ok(&["test"]);
-    assert!(
-        out.contains("b-guest declares no build; skipping"),
-        "{out}"
-    );
+    assert!(out.contains("b-guest declares no build; skipping"), "{out}");
     assert!(
         out.contains("a-project-b-guest: run on b-guest"),
         "the skip must not cost the guest its run: {out}"
@@ -1427,19 +1499,32 @@ datasets = ["state"]
     // The b session has run before and holds a pristine; the a session --
     // which sorts first, which is what made the early return quiet -- has
     // nothing yet.
-    write(&h.dir.join("snapshots.a-project-b-guest"), "pristine\n", None);
+    write(
+        &h.dir.join("snapshots.a-project-b-guest"),
+        "pristine\n",
+        None,
+    );
 
     let out = h.ok(&["test"]);
     assert!(
         out.contains("a-project-a-guest: nothing to reset to yet"),
         "{out}"
     );
-    assert!(out.contains("a-project-b-guest: reset to pristine"), "{out}");
+    assert!(
+        out.contains("a-project-b-guest: reset to pristine"),
+        "{out}"
+    );
     let rolled: Vec<&str> = h
         .log("ssh.log")
         .lines()
         .filter(|l| l.contains("rollback --dataset state"))
-        .map(|l| if l.contains("known-hosts-a-project-b-guest") { "b" } else { "a" })
+        .map(|l| {
+            if l.contains("known-hosts-a-project-b-guest") {
+                "b"
+            } else {
+                "a"
+            }
+        })
         .collect::<Vec<_>>()
         .into_iter()
         .collect();
@@ -1566,7 +1651,10 @@ fn down_with_a_manifest_collects_results_from_anywhere() {
     let elsewhere = h.dir.join("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
     let manifest = h.dir.join(".reaper.toml");
-    let out = h.run_from(&elsewhere, &["down", "--manifest", manifest.to_str().unwrap()]);
+    let out = h.run_from(
+        &elsewhere,
+        &["down", "--manifest", manifest.to_str().unwrap()],
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{stdout}");
     assert!(
@@ -1627,7 +1715,9 @@ impl Harness {
         // Deliberately crude: the suite has no json dependency, and the field
         // is unambiguous in a file this shape.
         let key = format!("\"{session}\"");
-        let at = raw.find(&key).unwrap_or_else(|| panic!("no record {session} in:\n{raw}"));
+        let at = raw
+            .find(&key)
+            .unwrap_or_else(|| panic!("no record {session} in:\n{raw}"));
         let tail = &raw[at..];
         let f = tail.find("\"expires_at\"").expect("expires_at");
         let rest = &tail[f + "\"expires_at\"".len()..];
@@ -1807,10 +1897,7 @@ fn renew_survives_a_machine_the_sweeper_took() {
         stderr.contains("a-project-a-guest") && stderr.contains("gone"),
         "and the dead one is named, as gone: {stderr}"
     );
-    assert!(
-        stderr.contains("reaper down"),
-        "with the way out: {stderr}"
-    );
+    assert!(stderr.contains("reaper down"), "with the way out: {stderr}");
 }
 
 #[test]
@@ -1885,7 +1972,8 @@ fn list_says_gone_for_a_session_the_cluster_no_longer_has() {
     let h = Harness::new("listgone");
     h.ok(&["up"]);
     let m = h.hypervisor.machine_named("a-project").expect("machine");
-    h.hypervisor.hide_from_listing(m.parse().expect("an id this provider issued"));
+    h.hypervisor
+        .hide_from_listing(m.parse().expect("an id this provider issued"));
 
     let list = h.ok(&["list"]);
     assert!(
@@ -1966,7 +2054,10 @@ fn a_cluster_that_cannot_be_read_is_not_a_cluster_with_nothing_in_it() {
         list.contains("the cluster was not consulted"),
         "say why the column is empty: {list}"
     );
-    assert!(list.contains("a-project"), "and still show the record: {list}");
+    assert!(
+        list.contains("a-project"),
+        "and still show the record: {list}"
+    );
 }
 
 #[test]
@@ -2007,7 +2098,11 @@ fn an_up_nobody_answers_leaves_an_inspectable_tagged_session() {
         out.contains("nothing answered"),
         "say what happened and what to do: {out}"
     );
-    assert_eq!(h.machines().len(), 1, "the machine exists, tagged, for autopsy");
+    assert_eq!(
+        h.machines().len(),
+        1,
+        "the machine exists, tagged, for autopsy"
+    );
     let list = h.ok(&["list"]);
     assert!(list.contains("a-project"), "{list}");
     h.ok(&["down"]);
@@ -2152,7 +2247,8 @@ fn down_does_not_reach_into_a_machine_it_is_about_to_spare() {
     let after = h.ssh_log().len();
 
     assert_eq!(
-        before, after,
+        before,
+        after,
         "down must not open a connection to a machine it has decided is not \
          this session's; the log grew by {} byte(s): {said}",
         after.saturating_sub(before)
@@ -2228,7 +2324,11 @@ fn down_leaves_no_per_session_droppings_on_the_workstation() {
     h.ok(&["up"]);
     h.ok(&["sync"]);
     h.ok(&["down"]);
-    for leftover in ["known-hosts-a-project", "rsh-a-project", "heartbeat-a-project.log"] {
+    for leftover in [
+        "known-hosts-a-project",
+        "rsh-a-project",
+        "heartbeat-a-project.log",
+    ] {
         assert!(
             !h.dir.join(leftover).exists(),
             "{leftover} outlived its session"
@@ -2349,10 +2449,7 @@ datasets = ["state"]
     );
     h.ok(&["up"]);
     let err = h.fails(&["run"]);
-    assert!(
-        err.contains("sync"),
-        "say what has not happened yet: {err}"
-    );
+    assert!(err.contains("sync"), "say what has not happened yet: {err}");
     assert!(
         !h.log("ssh.log").contains("snapshot --dataset"),
         "and above all take no pristine of an empty workspace: {}",
@@ -2525,10 +2622,7 @@ datasets = ["state"]
         .count();
     assert_eq!(first, 1, "the first run asks (with --if-absent)");
     h.ok(&["run"]);
-    let second: usize = h
-        .log("ssh.log")
-        .matches("--if-absent")
-        .count();
+    let second: usize = h.log("ssh.log").matches("--if-absent").count();
     assert_eq!(
         second, 2,
         "the second run may ask again, but only ever --if-absent: the runner \
@@ -2582,7 +2676,10 @@ exclude = ["/target/", "*.tmp"]
     for p in pushes {
         assert!(p.contains("--exclude=/target/"), "{p}");
         assert!(p.contains("--exclude=*.tmp"), "{p}");
-        assert!(p.contains("--exclude=/out/"), "out/ is always protected: {p}");
+        assert!(
+            p.contains("--exclude=/out/"),
+            "out/ is always protected: {p}"
+        );
     }
 }
 
@@ -2601,7 +2698,12 @@ fn doctor_judges_a_healthy_site_clean() {
     assert!(stdout.contains("0 failed"), "{stdout}");
     // The honest warns: an unexercised sweeper and this harness's TLS mode.
     assert!(stdout.contains("WARN"), "{stdout}");
-    for label in ["site configuration", "session store", "manifest", "sessions"] {
+    for label in [
+        "site configuration",
+        "session store",
+        "manifest",
+        "sessions",
+    ] {
         assert!(stdout.contains(label), "missing {label}: {stdout}");
     }
 }
@@ -2613,7 +2715,10 @@ fn doctor_counts_a_refused_credential_as_one_failure() {
     let out = h.run(&["doctor"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{stdout}");
-    assert!(stdout.contains("1 failed"), "one cause, one failure: {stdout}");
+    assert!(
+        stdout.contains("1 failed"),
+        "one cause, one failure: {stdout}"
+    );
     assert!(stdout.contains("skipped"), "{stdout}");
 }
 
@@ -2627,7 +2732,10 @@ fn doctor_flags_a_record_whose_machine_is_gone() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{stdout}");
     assert!(stdout.contains("session a-project"), "{stdout}");
-    assert!(stdout.contains("reaper down"), "the way out is named: {stdout}");
+    assert!(
+        stdout.contains("reaper down"),
+        "the way out is named: {stdout}"
+    );
 }
 
 #[test]
@@ -2644,7 +2752,11 @@ fn doctor_fails_a_missing_transport_binary() {
 fn doctor_exits_two_when_it_cannot_run_at_all() {
     let h = Harness::new("doctorusage");
     let out = h.run(&["doctor", "--within", "nonsense"]);
-    assert_eq!(out.status.code(), Some(2), "a malformed flag is doctor's own failure");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a malformed flag is doctor's own failure"
+    );
 }
 
 #[test]
@@ -2713,7 +2825,10 @@ fn a_canary_collected_is_the_sweeper_proven() {
         .env("REAPER_STATE", dir.join("sessions.json"))
         .output()
         .expect("run doctor");
-    assert!(sweeper.join().unwrap(), "the stand-in sweeper saw no canary");
+    assert!(
+        sweeper.join().unwrap(),
+        "the stand-in sweeper saw no canary"
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{stdout}");
     assert!(stdout.contains("canary"), "{stdout}");
@@ -2781,7 +2896,11 @@ fn a_loop_that_fails_early_does_not_leave_the_last_green_run_in_place() {
     let out = h.dir.join("out");
     std::fs::create_dir_all(out.join("stage-3")).unwrap();
     std::fs::write(out.join("results.xml"), "<testsuite failures=\"0\"/>").unwrap();
-    std::fs::write(out.join("stage-3/results.xml"), "<testsuite failures=\"0\"/>").unwrap();
+    std::fs::write(
+        out.join("stage-3/results.xml"),
+        "<testsuite failures=\"0\"/>",
+    )
+    .unwrap();
 
     // This run never reaches the guest at all.
     h.make_ssh_fail("workspace");
@@ -2797,7 +2916,10 @@ fn a_loop_that_fails_early_does_not_leave_the_last_green_run_in_place() {
         leftovers.is_empty(),
         "a run that produced nothing must not leave the last run's results reading as its own: {leftovers:?}"
     );
-    assert!(out.exists(), "the directory itself is the rsync destination");
+    assert!(
+        out.exists(),
+        "the directory itself is the rsync destination"
+    );
 }
 
 #[test]
@@ -2827,7 +2949,10 @@ fn a_project_with_no_session_is_told_which_verb_makes_one() {
     let h = Harness::new("nosession");
     let err = h.fails(&["test"]);
     assert!(err.contains("no sessions for"), "{err}");
-    assert!(err.contains("reaper up"), "name the verb that makes one: {err}");
+    assert!(
+        err.contains("reaper up"),
+        "name the verb that makes one: {err}"
+    );
 }
 
 #[test]
@@ -2858,10 +2983,7 @@ fn a_verb_against_an_expired_session_says_so_rather_than_timing_out() {
         err.contains("expired"),
         "the expiry is the explanation, and it is in the record: {err}"
     );
-    assert!(
-        err.contains("reaper up"),
-        "and say what recovers it: {err}"
-    );
+    assert!(err.contains("reaper up"), "and say what recovers it: {err}");
 }
 
 #[test]
@@ -2889,7 +3011,6 @@ fn a_forward_sync_says_what_it_removed_there() {
         "without it rsync says nothing about what it deleted: {forward}"
     );
 }
-
 
 #[test]
 fn a_listing_whose_reader_goes_away_ends_quietly() {
@@ -2939,7 +3060,10 @@ fn a_listing_whose_reader_goes_away_ends_quietly() {
         let mut reader = BufReader::new(out);
         let mut first = String::new();
         reader.read_line(&mut first).expect("the header");
-        assert!(first.starts_with("SESSION"), "wanted the header, got {first:?}");
+        assert!(
+            first.starts_with("SESSION"),
+            "wanted the header, got {first:?}"
+        );
         // Dropped here: the reader has gone, exactly as `head -1` leaves it.
     }
 
@@ -3087,7 +3211,10 @@ fn a_run_refuses_while_a_job_has_no_session() {
     let err = h.fails(&["up"]);
     assert!(err.contains("max_concurrent"), "{err}");
     let list = h.ok(&["list"]);
-    assert!(list.contains("a-project-fast"), "the half that fits: {list}");
+    assert!(
+        list.contains("a-project-fast"),
+        "the half that fits: {list}"
+    );
 
     h.ok(&["sync"]);
     let err = h.fails(&["run"]);

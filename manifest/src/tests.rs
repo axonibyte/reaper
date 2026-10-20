@@ -100,7 +100,10 @@ fn every_shipped_example_loads() {
         assert!(!m.guests.is_empty());
         seen += 1;
     }
-    assert!(seen >= 2, "expected at least two worked examples, found {seen}");
+    assert!(
+        seen >= 2,
+        "expected at least two worked examples, found {seen}"
+    );
 }
 
 /// The execution-mode invariant, asserted over whatever examples exist rather
@@ -247,7 +250,9 @@ fn the_exec_conditional_is_checked_after_merging() {
         panic!("expected Invalid, got {e}");
     };
     assert!(
-        problems.iter().any(|p| p.contains("once defaults are merged in")),
+        problems
+            .iter()
+            .any(|p| p.contains("once defaults are merged in")),
         "the failure should name the merged form: {problems:?}"
     );
 }
@@ -323,7 +328,8 @@ fn a_verb_may_override_the_guests_execution_mode() {
     // And the override does not drag an image along with it.
     assert!(g.build.as_ref().unwrap().image.is_some());
     assert_eq!(
-        sole_job(g).image, None,
+        sole_job(g).image,
+        None,
         "a host-execution run has nowhere to run an image, so it must not \
          inherit one -- it would then be rejected for a key nobody wrote"
     );
@@ -338,7 +344,8 @@ fn a_container_run_inherits_the_build_image() {
 
     assert!(build_image.is_some());
     assert_eq!(
-        sole_job(g).image, build_image,
+        sole_job(g).image,
+        build_image,
         "the run declared no image of its own, so it runs in the build's"
     );
 }
@@ -363,7 +370,10 @@ fn jobs_shard_one_command_across_sessions() {
     );
 
     for j in &g.run.jobs {
-        assert_eq!(j.cmd, "make check", "every shard inherits the run's command");
+        assert_eq!(
+            j.cmd, "make check",
+            "every shard inherits the run's command"
+        );
         assert_eq!(j.exec, Exec::Host, "and the guest's execution mode");
         assert_eq!(j.image, None);
     }
@@ -521,10 +531,7 @@ cmd = "make slower"
         text.contains("more than once"),
         "the complaint must name the problem: {text}"
     );
-    assert!(
-        text.contains("slow"),
-        "and the job it is about: {text}"
-    );
+    assert!(text.contains("slow"), "and the job it is about: {text}");
 }
 
 /// A run that names its own image keeps it. Inheritance is a fallback, not an
@@ -546,7 +553,11 @@ image = "docker.io/library/driver@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 cmd = "make check"
 "#;
     let m = from_str(text, "<inline>").expect("valid");
-    assert!(sole_job(&m.guests[0]).image.as_deref().unwrap().contains("driver"));
+    assert!(sole_job(&m.guests[0])
+        .image
+        .as_deref()
+        .unwrap()
+        .contains("driver"));
 }
 
 /// Sync exclusions are read and handed on uninterpreted. The framework does not
@@ -569,7 +580,9 @@ fn a_container_verb_with_no_image_anywhere_is_refused() {
         panic!("expected Invalid, got {e}");
     };
     assert!(
-        problems.iter().any(|p| p.contains("/run") && p.contains("image")),
+        problems
+            .iter()
+            .any(|p| p.contains("/run") && p.contains("image")),
         "the failure should name the run's missing image: {problems:?}"
     );
 }
@@ -687,11 +700,16 @@ const SKELETON: &str =
 
 #[test]
 fn profile_names_and_env_keys_are_held_to_their_patterns() {
-    let p = load_str_err(&format!("{SKELETON}[profiles.\"Bad Name\"]\nwarm_cache = false\n"));
+    let p = load_str_err(&format!(
+        "{SKELETON}[profiles.\"Bad Name\"]\nwarm_cache = false\n"
+    ));
     assert!(p.iter().any(|m| m.contains("Bad Name")), "{p:?}");
 
     let p = load_str_err(&format!("{SKELETON}profiles = {{}}\n"));
-    assert!(!p.is_empty(), "an empty profiles table is dead weight: {p:?}");
+    assert!(
+        !p.is_empty(),
+        "an empty profiles table is dead weight: {p:?}"
+    );
 
     let p = load_str_err("\nschema = 1\nproject = \"p\"\nguests = [\"g\"]\nexec = \"host\"\nrun = { cmd = \"make\", env = { \"1BAD\" = \"x\" } }\n");
     assert!(p.iter().any(|m| m.contains("1BAD")), "{p:?}");

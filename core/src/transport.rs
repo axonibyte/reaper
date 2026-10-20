@@ -13,8 +13,15 @@ use std::time::Duration;
 
 #[derive(Debug)]
 pub enum TransportError {
-    Spawn { program: String, source: std::io::Error },
-    Failed { what: String, status: i32, stderr: String },
+    Spawn {
+        program: String,
+        source: std::io::Error,
+    },
+    Failed {
+        what: String,
+        status: i32,
+        stderr: String,
+    },
     /// The command stopped making progress and was given up on.
     ///
     /// Deliberately distinct from `Failed`: only one of the two says anything
@@ -31,7 +38,11 @@ impl fmt::Display for TransportError {
             TransportError::Spawn { program, source } => {
                 write!(f, "could not run {program}: {source}")
             }
-            TransportError::Failed { what, status, stderr } => {
+            TransportError::Failed {
+                what,
+                status,
+                stderr,
+            } => {
                 write!(f, "{what} failed ({status})")?;
                 let trimmed = stderr.trim();
                 if !trimmed.is_empty() {
@@ -126,10 +137,14 @@ impl Ssh {
     /// least convenient moment, in a command that cannot answer one.
     pub fn transport_options(&self) -> Vec<String> {
         let mut o = vec![
-            "-o".into(), "BatchMode=yes".into(),
-            "-o".into(), "StrictHostKeyChecking=accept-new".into(),
-            "-o".into(), format!("UserKnownHostsFile={}", self.known_hosts.display()),
-            "-o".into(), format!("ConnectTimeout={}", self.connect_timeout.as_secs()),
+            "-o".into(),
+            "BatchMode=yes".into(),
+            "-o".into(),
+            "StrictHostKeyChecking=accept-new".into(),
+            "-o".into(),
+            format!("UserKnownHostsFile={}", self.known_hosts.display()),
+            "-o".into(),
+            format!("ConnectTimeout={}", self.connect_timeout.as_secs()),
             // ConnectTimeout bounds *establishing* a connection and nothing
             // after it. These bound an established one: without them a
             // connection whose path has quietly gone away is indistinguishable
@@ -140,9 +155,15 @@ impl Ssh {
             // They do not bound a command that is merely slow, which is the
             // point -- a build that runs for an hour without printing anything
             // keeps answering keepalives and is left alone.
-            "-o".into(), format!("ServerAliveInterval={}", (self.io_timeout.as_secs() / 4).max(1)),
-            "-o".into(), "ServerAliveCountMax=4".into(),
-            "-l".into(), self.user.clone(),
+            "-o".into(),
+            format!(
+                "ServerAliveInterval={}",
+                (self.io_timeout.as_secs() / 4).max(1)
+            ),
+            "-o".into(),
+            "ServerAliveCountMax=4".into(),
+            "-l".into(),
+            self.user.clone(),
         ];
         if let Some(k) = &self.key {
             o.push("-i".into());

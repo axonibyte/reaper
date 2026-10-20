@@ -99,7 +99,10 @@ pub enum ProviderError {
     /// The request never got an answer.
     Transport(String),
     /// The provider answered, and the answer was a refusal or a surprise.
-    Api { status: u16, message: String },
+    Api {
+        status: u16,
+        message: String,
+    },
     /// The provider's own configuration is wrong or missing.
     Config(String),
 }

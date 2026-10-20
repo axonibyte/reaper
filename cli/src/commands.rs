@@ -14,7 +14,6 @@ use reaper_core::transport::{Ssh, Transport};
 use reaper_core::{config, duration, job};
 use reaper_manifest::{Exec, Manifest};
 
-
 pub type Error = Box<dyn std::error::Error>;
 type Result<T> = std::result::Result<T, Error>;
 
@@ -23,14 +22,19 @@ fn load_config() -> Result<Config> {
 }
 
 fn provider_for(cfg: &Config) -> Result<Box<dyn Provider>> {
-    Ok(reaper_providers::build(&cfg.provider, cfg.provider_table())?)
+    Ok(reaper_providers::build(
+        &cfg.provider,
+        cfg.provider_table(),
+    )?)
 }
 
 /// A manifest, and the directory it sits in -- which is the tree that gets
 /// synced. Taken from the manifest rather than from the current directory, so
 /// `--manifest` points at a project rather than just at a file.
 fn load_manifest_at(explicit: Option<PathBuf>) -> Result<(Manifest, PathBuf)> {
-    let path = explicit.clone().unwrap_or_else(|| PathBuf::from(".reaper.toml"));
+    let path = explicit
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(".reaper.toml"));
     let root = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -92,7 +96,12 @@ fn results_subdir(s: &Session) -> Option<&str> {
     s.name.strip_prefix(&prefix)
 }
 
-fn ttl_for(cfg: &Config, manifest: &Manifest, profile: Option<&str>, override_: Option<&str>) -> Result<Duration> {
+fn ttl_for(
+    cfg: &Config,
+    manifest: &Manifest,
+    profile: Option<&str>,
+    override_: Option<&str>,
+) -> Result<Duration> {
     if let Some(t) = override_ {
         return Ok(duration::parse(t)?);
     }
@@ -101,7 +110,11 @@ fn ttl_for(cfg: &Config, manifest: &Manifest, profile: Option<&str>, override_: 
             let known: Vec<&str> = manifest.profiles.keys().map(String::as_str).collect();
             format!(
                 "the manifest has no profile {name:?}; it defines: {}",
-                if known.is_empty() { "none".to_string() } else { known.join(", ") }
+                if known.is_empty() {
+                    "none".to_string()
+                } else {
+                    known.join(", ")
+                }
             )
         })?;
         if let Some(t) = &p.ttl {
@@ -208,7 +221,6 @@ pub fn up(
     // verbs -- a run of three shards out of four must not report a green
     // suite. See `every_job_has_a_session`.
     for (g, job, name) in planned {
-
         if let Some(existing) = store.get(&name)? {
             // Whose record is this? Session names are {project}-{guest} (or
             // the bare project), so distinct projects can mint the same name
@@ -239,8 +251,7 @@ pub fn up(
             // machine the sweeper has taken hands back a session every verb
             // fails against, with a heartbeat that ends seconds later.
             let live_machines = provider.list()?;
-            let Some(summary) = live_machines.iter().find(|m| m.machine == existing.machine)
-            else {
+            let Some(summary) = live_machines.iter().find(|m| m.machine == existing.machine) else {
                 return Err(format!(
                     "{name}: its machine is gone (the sweeper collects anything past its expiry). `reaper down {name}` clears the record, and the next `reaper up` starts fresh"
                 )
@@ -300,7 +311,10 @@ pub fn up(
             .into());
         }
 
-        let template = cfg.template_for(&g.name).expect("resolved above").to_string();
+        let template = cfg
+            .template_for(&g.name)
+            .expect("resolved above")
+            .to_string();
         say!("{name}: creating on {}", g.name);
 
         // The first expiry is the readiness grace, not the session's TTL: a
@@ -624,10 +638,9 @@ fn workspace(ssh: &Ssh, project: &str) -> Result<(String, String)> {
     }
     match (work, results) {
         (Some(w), Some(o)) => Ok((w, o)),
-        _ => Err(format!(
-            "the runner did not say where the workspace is; it replied: {reply:?}"
-        )
-        .into()),
+        _ => Err(
+            format!("the runner did not say where the workspace is; it replied: {reply:?}").into(),
+        ),
     }
 }
 
@@ -746,8 +759,7 @@ impl Drop for Renewing {
     /// Stops the renewal and WAITS for it, so no renewal lands after the work
     /// that justified it has returned.
     fn drop(&mut self) {
-        self.stop
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -793,7 +805,12 @@ fn cluster_view() -> (ClusterView, Option<Box<dyn Provider>>) {
         Ok(c) => c,
         // `list` answered from the store alone for as long as it existed, so a
         // box with records and no usable configuration still gets its table.
-        Err(e) => return (ClusterView::Silent(format!("no usable configuration ({e})")), None),
+        Err(e) => {
+            return (
+                ClusterView::Silent(format!("no usable configuration ({e})")),
+                None,
+            )
+        }
     };
     let provider = match provider_for(&cfg) {
         Ok(p) => p,
@@ -873,7 +890,12 @@ pub fn list() -> Result<()> {
     let now = SystemTime::now();
     say!(
         "{:<24} {:<16} {:<8} {:<10} {:<16} {}",
-        "SESSION", "GUEST", "AGE", "EXPIRES", "ADDRESS", "CLUSTER"
+        "SESSION",
+        "GUEST",
+        "AGE",
+        "EXPIRES",
+        "ADDRESS",
+        "CLUSTER"
     );
     let mut reused: Vec<String> = Vec::new();
     for s in sessions {
@@ -896,7 +918,9 @@ pub fn list() -> Result<()> {
             s.guest,
             duration::format_rough(s.age(now)),
             expires,
-            s.address.map(|a| a.to_string()).unwrap_or_else(|| "-".into()),
+            s.address
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "-".into()),
             verdict
         );
     }
@@ -1188,7 +1212,8 @@ pub fn down(session: Option<String>, all: bool, manifest_path: Option<PathBuf>) 
                 warn_line!(
                     "{}: could not destroy {}: {e}. The session is kept so it \
                      stays visible; its expiry means it will be collected regardless",
-                    s.name, s.machine
+                    s.name,
+                    s.machine
                 );
             }
         }
@@ -1383,7 +1408,6 @@ pub fn sync(session: Option<String>, manifest_path: Option<PathBuf>) -> Result<(
     Ok(())
 }
 
-
 /// Take `@pristine` after a run, if the tenant wants resets and has none yet.
 ///
 /// Be exact about what this captures: the state *after* the whole run, test
@@ -1435,7 +1459,6 @@ fn start_control(ssh: &Ssh, project: &str) -> Result<()> {
 fn reset_datasets(manifest: &Manifest) -> &[String] {
     &manifest.reset
 }
-
 
 /// The points a session's state can be rolled back to.
 fn existing_snapshots(ssh: &Ssh, dataset: &str) -> Result<Vec<String>> {
@@ -1612,7 +1635,10 @@ pub fn snapshot(
             // and the runner's own validation runs only after the remote
             // shell has already parsed the string.
             ssh.run(
-                &format!("{RUNNER_PATH} snapshot --dataset {d} --name {}", job::quote(&name)),
+                &format!(
+                    "{RUNNER_PATH} snapshot --dataset {d} --name {}",
+                    job::quote(&name)
+                ),
                 "taking a snapshot",
             )?;
         }
@@ -1654,7 +1680,10 @@ pub fn reset(
             // and what it rolls back, and that is exactly what somebody
             // watching a reset wants to see.
             ssh.run_live(
-                &format!("{RUNNER_PATH} rollback --dataset {d} --name {}", job::quote(&name)),
+                &format!(
+                    "{RUNNER_PATH} rollback --dataset {d} --name {}",
+                    job::quote(&name)
+                ),
                 "rolling back",
             )?;
         }
@@ -1819,7 +1848,11 @@ pub fn exec(
         // names instead -- which this did first -- broke every command that
         // referred to a cache path, which is the documented way to use one.
         let warm = profile.and_then(|p| p.warm_cache) != Some(false);
-        let caches: Vec<String> = g.build.as_ref().map(|b| b.cache.clone()).unwrap_or_default();
+        let caches: Vec<String> = g
+            .build
+            .as_ref()
+            .map(|b| b.cache.clone())
+            .unwrap_or_default();
 
         let env: BTreeMap<String, String> = job::overlay(verb_env, profile.map(|p| &p.env));
         let script = job::render(cmd, &env);
@@ -2053,7 +2086,8 @@ fn collect_last_results(cfg: &Config, s: &Session, manifest_path: Option<&Path>)
         warn_line!(
             "{}: not standing in {}, so its results have nowhere to land. \
              Run `reaper sync` from the project before taking it down if you want them",
-            s.name, s.project
+            s.name,
+            s.project
         );
         return;
     };
@@ -2102,7 +2136,11 @@ struct Report {
 
 impl Report {
     fn new() -> Report {
-        Report { ok: 0, warn: 0, fail: 0 }
+        Report {
+            ok: 0,
+            warn: 0,
+            fail: 0,
+        }
     }
 
     fn section(&mut self, title: &str) {
@@ -2165,13 +2203,21 @@ pub fn doctor(
     r.line(
         "site configuration",
         Health::Ok,
-        &format!("{} parses, {} guest(s) registered", cfg.path.display(), cfg.guests.len()),
+        &format!(
+            "{} parses, {} guest(s) registered",
+            cfg.path.display(),
+            cfg.guests.len()
+        ),
     );
 
     match missing_ssh_key(&cfg) {
         Some(complaint) => r.line("session key", Health::Fail, &complaint),
         None => match &cfg.session.ssh_key {
-            Some(k) => r.line("session key", Health::Ok, &format!("{} exists", k.display())),
+            Some(k) => r.line(
+                "session key",
+                Health::Ok,
+                &format!("{} exists", k.display()),
+            ),
             None => r.line(
                 "session key",
                 Health::Warn,
@@ -2190,8 +2236,10 @@ pub fn doctor(
             None => r.line(
                 what,
                 Health::Fail,
-                &format!("{cmd} is not on PATH and is not an executable path; \
-                          every session operation needs it"),
+                &format!(
+                    "{cmd} is not on PATH and is not an executable path; \
+                          every session operation needs it"
+                ),
             ),
         }
     }
@@ -2221,7 +2269,11 @@ pub fn doctor(
             .map(|(t, gs)| format!("{t} is registered for {}", gs.join(" and ")))
             .collect();
         if shared.is_empty() {
-            r.line("guest registry", Health::Ok, "every guest has its own template");
+            r.line(
+                "guest registry",
+                Health::Ok,
+                "every guest has its own template",
+            );
         } else {
             r.line("guest registry", Health::Warn, &shared.join("\n"));
         }
@@ -2242,8 +2294,10 @@ pub fn doctor(
                     r.line(
                         "manifest",
                         Health::Ok,
-                        &format!("{} is valid and every guest it names is registered",
-                                 manifest_at.display()),
+                        &format!(
+                            "{} is valid and every guest it names is registered",
+                            manifest_at.display()
+                        ),
                     );
                 } else {
                     r.line("manifest", Health::Fail, &complaints.join("\n"));
@@ -2312,15 +2366,21 @@ pub fn doctor(
                         ));
                     }
                     Some(_) => {}
-                    None => notes.push("machine check skipped: the provider \
-                                        could not list".to_string()),
+                    None => notes.push(
+                        "machine check skipped: the provider \
+                                        could not list"
+                            .to_string(),
+                    ),
                 }
                 if s.remaining(now).is_none() {
                     if worst == Health::Ok {
                         worst = Health::Warn;
                     }
-                    notes.push("its record is expired: the sweeper may take \
-                                the machine at any moment".to_string());
+                    notes.push(
+                        "its record is expired: the sweeper may take \
+                                the machine at any moment"
+                            .to_string(),
+                    );
                 }
                 if notes.is_empty() {
                     notes.push("record and machine agree".to_string());
@@ -2343,19 +2403,17 @@ pub fn doctor(
 /// watch for the sweeper to take it. Inherently safe -- even a crashed doctor
 /// leaves nothing the sweeper will not collect -- and the strongest evidence
 /// there is: a canary disappearing IS the sweeper working.
-fn run_canary(
-    r: &mut Report,
-    cfg: &Config,
-    provider: &dyn Provider,
-    within: Duration,
-) {
+fn run_canary(r: &mut Report, cfg: &Config, provider: &dyn Provider, within: Duration) {
     use reaper_core::Health;
-    let Some((guest, template)) = cfg
-        .guest_names()
-        .first()
-        .and_then(|n| cfg.template_for(n).map(|t| ((*n).to_string(), t.to_string())))
-    else {
-        r.line("canary", Health::Fail, "no guest is registered to clone from");
+    let Some((guest, template)) = cfg.guest_names().first().and_then(|n| {
+        cfg.template_for(n)
+            .map(|t| ((*n).to_string(), t.to_string()))
+    }) else {
+        r.line(
+            "canary",
+            Health::Fail,
+            "no guest is registered to clone from",
+        );
         return;
     };
 
@@ -2427,8 +2485,10 @@ fn run_canary(
             );
             return;
         }
-        Err(e) => format!("and destroying it failed too ({e}); it is expired, so \
-                           a working sweeper would still collect it"),
+        Err(e) => format!(
+            "and destroying it failed too ({e}); it is expired, so \
+                           a working sweeper would still collect it"
+        ),
     };
     r.line(
         "canary",

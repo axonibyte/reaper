@@ -25,7 +25,9 @@ impl IdRange {
     pub fn new(low: u32, high: u32) -> Result<IdRange, String> {
         // Proxmox itself will not accept an identifier below 100.
         if low < 100 {
-            return Err(format!("{low} is below the lowest identifier Proxmox allows (100)"));
+            return Err(format!(
+                "{low} is below the lowest identifier Proxmox allows (100)"
+            ));
         }
         if low > high {
             return Err(format!("range {low}-{high} is inverted"));
@@ -100,7 +102,9 @@ mod tests {
 
     #[test]
     fn a_reference_that_is_not_an_identifier_is_refused() {
-        for raw in ["", "abc", "9000x", "-9000", "9000 ", " 9000", "0x2328", "9000.0"] {
+        for raw in [
+            "", "abc", "9000x", "-9000", "9000 ", " 9000", "0x2328", "9000.0",
+        ] {
             assert!(
                 range().check(&MachineRef::new(raw)).is_err(),
                 "{raw:?} should be refused"
@@ -112,7 +116,10 @@ mod tests {
     fn the_refusal_says_what_was_wrong() {
         let e = range().check(&MachineRef::new("8100")).unwrap_err();
         let m = e.to_string();
-        assert!(m.contains("8100") && m.contains("9000-9099"), "unhelpful: {m}");
+        assert!(
+            m.contains("8100") && m.contains("9000-9099"),
+            "unhelpful: {m}"
+        );
         assert!(m.contains("before contacting the API"), "unhelpful: {m}");
     }
 
@@ -121,6 +128,9 @@ mod tests {
         assert!(IdRange::new(9099, 9000).is_err(), "inverted");
         assert!(IdRange::new(0, 9099).is_err(), "below the Proxmox minimum");
         assert!(IdRange::new(99, 100).is_err(), "below the Proxmox minimum");
-        assert!(IdRange::new(9000, 9000).is_ok(), "a single identifier is a range");
+        assert!(
+            IdRange::new(9000, 9000).is_ok(),
+            "a single identifier is a range"
+        );
     }
 }

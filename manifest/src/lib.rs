@@ -33,7 +33,10 @@ pub const SCHEMA: &str = include_str!("../schema/v1.json");
 #[derive(Debug)]
 pub enum Error {
     /// The file could not be read.
-    Read { path: String, source: std::io::Error },
+    Read {
+        path: String,
+        source: std::io::Error,
+    },
     /// The file is not parseable as TOML, or is not expressible as JSON.
     Parse { path: String, message: String },
     /// The manifest is well-formed but does not satisfy the schema. Every
@@ -203,10 +206,7 @@ impl Guest {
     /// may have been edited. Position would silently hand over a different
     /// job's command; a name hands over nothing.
     pub fn job(&self, name: Option<&str>) -> Option<&Job> {
-        self.run
-            .jobs
-            .iter()
-            .find(|j| j.name.as_deref() == name)
+        self.run.jobs.iter().find(|j| j.name.as_deref() == name)
     }
 }
 

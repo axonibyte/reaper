@@ -22,17 +22,30 @@ pub const RESULTS: &str = "out";
 
 #[derive(Debug)]
 pub enum SyncError {
-    Spawn { program: String, source: io::Error },
-    Failed { what: String, status: i32, stderr: String },
+    Spawn {
+        program: String,
+        source: io::Error,
+    },
+    Failed {
+        what: String,
+        status: i32,
+        stderr: String,
+    },
     /// The transport wrapper's path is unusable. See [`rsh_wrapper`].
-    UnusablePath { path: PathBuf },
+    UnusablePath {
+        path: PathBuf,
+    },
 }
 
 impl fmt::Display for SyncError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SyncError::Spawn { program, source } => write!(f, "could not run {program}: {source}"),
-            SyncError::Failed { what, status, stderr } => {
+            SyncError::Failed {
+                what,
+                status,
+                stderr,
+            } => {
                 write!(f, "{what} failed ({status})")?;
                 let trimmed = stderr.trim();
                 if !trimmed.is_empty() {
@@ -101,7 +114,9 @@ impl Plan {
 pub fn rsh_wrapper(ssh: &Ssh, at: &Path) -> Result<PathBuf> {
     let text = at.to_string_lossy();
     if text.chars().any(char::is_whitespace) {
-        return Err(SyncError::UnusablePath { path: at.to_path_buf() });
+        return Err(SyncError::UnusablePath {
+            path: at.to_path_buf(),
+        });
     }
 
     let mut script = String::from("#!/bin/sh\n");
@@ -158,7 +173,14 @@ fn make_executable(at: &Path) -> Result<()> {
 ///
 /// No `-z`. This is a local network, and compressing an already-compressed
 /// artifact costs more than it saves.
-pub fn push(rsync: &str, rsh: &Path, ssh: &Ssh, local: &Path, remote: &str, exclude: &[String]) -> Plan {
+pub fn push(
+    rsync: &str,
+    rsh: &Path,
+    ssh: &Ssh,
+    local: &Path,
+    remote: &str,
+    exclude: &[String],
+) -> Plan {
     let mut args = vec![
         "-a".to_string(),
         "--delete".to_string(),
@@ -188,7 +210,10 @@ pub fn push(rsync: &str, rsh: &Path, ssh: &Ssh, local: &Path, remote: &str, excl
     args.push(rsh.to_string_lossy().to_string());
     args.push(dir(local));
     args.push(format!("{}:{}", ssh.rsync_host(), with_slash(remote)));
-    Plan { program: rsync.to_string(), args }
+    Plan {
+        program: rsync.to_string(),
+        args,
+    }
 }
 
 /// How many paths a forward sync removed from the receiver.
@@ -231,7 +256,10 @@ pub fn pull(rsync: &str, rsh: &Path, ssh: &Ssh, remote: &str, local: &Path) -> P
         format!("{}:{}", ssh.rsync_host(), with_slash(remote)),
         dir(local),
     ]);
-    Plan { program: rsync.to_string(), args }
+    Plan {
+        program: rsync.to_string(),
+        args,
+    }
 }
 
 /// Empty the workstation's results directory, and say how many entries went.

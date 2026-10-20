@@ -143,7 +143,10 @@ x = 1
 "#;
     let e = parse(text).expect_err("should be refused");
     let msg = e.to_string();
-    assert!(msg.contains("no [absent] section"), "unhelpful message: {msg}");
+    assert!(
+        msg.contains("no [absent] section"),
+        "unhelpful message: {msg}"
+    );
 }
 
 #[test]
@@ -234,7 +237,10 @@ fn a_missing_configuration_names_where_it_looked() {
     std::env::set_var("REAPER_CONFIG", "/nonexistent/reaper/config.toml");
     let e = config::load().expect_err("should not find one");
     std::env::remove_var("REAPER_CONFIG");
-    assert!(e.to_string().contains("/nonexistent/reaper/config.toml"), "{e}");
+    assert!(
+        e.to_string().contains("/nonexistent/reaper/config.toml"),
+        "{e}"
+    );
 }
 
 // --- paths -----------------------------------------------------------------
@@ -246,7 +252,10 @@ fn tilde_expands_only_where_it_means_a_home_directory() {
     std::env::set_var("HOME", "/home/someone");
 
     assert_eq!(paths::expand_tilde("~"), PathBuf::from("/home/someone"));
-    assert_eq!(paths::expand_tilde("~/x/y"), PathBuf::from("/home/someone/x/y"));
+    assert_eq!(
+        paths::expand_tilde("~/x/y"),
+        PathBuf::from("/home/someone/x/y")
+    );
     // Another user's home is not something this project resolves, and a
     // directory that happens to be named ~ is just a directory.
     assert_eq!(paths::expand_tilde("~other/x"), PathBuf::from("~other/x"));
@@ -471,10 +480,9 @@ fn writes_replace_the_file_rather_than_editing_it_in_place() {
         probe.unlock().unwrap();
     }
 
-    assert!(serde_json::from_str::<serde_json::Value>(
-        &std::fs::read_to_string(&path).unwrap()
-    )
-    .is_ok());
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap()).is_ok()
+    );
 }
 
 #[test]
@@ -537,13 +545,13 @@ fn a_leftover_lock_file_of_any_age_is_not_a_lock() {
 #[test]
 fn remaining_time_runs_out_rather_than_going_negative() {
     let s = session("alpha", "m-1");
-    assert_eq!(
-        s.remaining(s.created_at),
-        Some(Duration::from_secs(7200))
-    );
+    assert_eq!(s.remaining(s.created_at), Some(Duration::from_secs(7200)));
     // Past the expiry there is no "negative time left"; there is no time left.
     assert_eq!(s.remaining(s.expires_at + Duration::from_secs(1)), None);
-    assert_eq!(s.age(s.created_at + Duration::from_secs(60)), Duration::from_secs(60));
+    assert_eq!(
+        s.age(s.created_at + Duration::from_secs(60)),
+        Duration::from_secs(60)
+    );
 }
 
 #[test]
@@ -587,8 +595,14 @@ fn times_are_kept_to_whole_seconds_on_purpose() {
     store.put(s).unwrap();
 
     let got = store.get("alpha").unwrap().unwrap();
-    assert_eq!(got.expires_at, UNIX_EPOCH + Duration::from_secs(1_700_000_000));
-    assert!(got.expires_at <= ragged, "truncation must never round forward");
+    assert_eq!(
+        got.expires_at,
+        UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+    );
+    assert!(
+        got.expires_at <= ragged,
+        "truncation must never round forward"
+    );
 }
 
 #[test]
@@ -599,13 +613,19 @@ fn the_default_pool_size_has_bounds_at_both_ends() {
         let text = format!(
             "provider = \"p\"\n[session]\ndefault_disk_gb = {bad}\n[guests.g]\ntemplate = \"t\"\n[p]\n"
         );
-        assert!(parse(&text).is_err(), "default_disk_gb = {bad} should be refused");
+        assert!(
+            parse(&text).is_err(),
+            "default_disk_gb = {bad} should be refused"
+        );
     }
     for good in [1, 64, 4096] {
         let text = format!(
             "provider = \"p\"\n[session]\ndefault_disk_gb = {good}\n[guests.g]\ntemplate = \"t\"\n[p]\n"
         );
-        assert!(parse(&text).is_ok(), "default_disk_gb = {good} should be accepted");
+        assert!(
+            parse(&text).is_ok(),
+            "default_disk_gb = {good} should be accepted"
+        );
     }
 }
 
@@ -721,9 +741,8 @@ use crate::job;
 /// what this test expects; asserting on what a shell makes of it proves the
 /// escaping works.
 fn value_through_sh(value: &str) -> String {
-    let env: BTreeMap<String, String> = [("V".to_string(), value.to_string())]
-        .into_iter()
-        .collect();
+    let env: BTreeMap<String, String> =
+        [("V".to_string(), value.to_string())].into_iter().collect();
     // `printf %s` rather than echo: echo mangles backslashes on some shells,
     // and this test would then be measuring echo.
     let script = job::render("printf '%s' \"$V\" > \"$OUT\"", &env);
@@ -860,12 +879,18 @@ fn the_forward_sync_mirrors_deletions_and_protects_the_results_directory() {
         !plan.args.iter().any(|a| a == "--delete-excluded"),
         "excluded means protected on the receiver, not destroyed"
     );
-    assert!(!plan.args.iter().any(|a| a == "-z"), "no compression on a LAN");
+    assert!(
+        !plan.args.iter().any(|a| a == "-z"),
+        "no compression on a LAN"
+    );
 
     // Trailing slashes on both ends. Without one on the source, rsync nests the
     // tree one directory deeper on every single sync.
     assert_eq!(plan.args[plan.args.len() - 2], "/home/tree/");
-    assert_eq!(plan.args[plan.args.len() - 1], "192.0.2.1:/pool/work/a-project/");
+    assert_eq!(
+        plan.args[plan.args.len() - 1],
+        "192.0.2.1:/pool/work/a-project/"
+    );
 }
 
 #[test]
@@ -896,7 +921,11 @@ fn the_forward_sync_reports_what_it_removed() {
 cd+++++++++ src/new/
 ";
     assert_eq!(sync::deletions(itemized), 2);
-    assert_eq!(sync::deletions(""), 0, "a sync that removed nothing says nothing");
+    assert_eq!(
+        sync::deletions(""),
+        0,
+        "a sync that removed nothing says nothing"
+    );
 }
 
 #[test]
@@ -910,18 +939,28 @@ fn clearing_the_results_directory_empties_it_and_keeps_it() {
 
     std::fs::create_dir_all(out.join("stage-3")).unwrap();
     std::fs::write(out.join("results.xml"), b"<testsuite failures=\"0\"/>").unwrap();
-    std::fs::write(out.join("stage-3/results.xml"), b"<testsuite failures=\"0\"/>").unwrap();
+    std::fs::write(
+        out.join("stage-3/results.xml"),
+        b"<testsuite failures=\"0\"/>",
+    )
+    .unwrap();
     // Outside the results directory, and none of its business.
     std::fs::write(tree.join("src.rs"), b"fn main() {}").unwrap();
 
     assert_eq!(sync::clear_results(&tree).expect("clear"), 2);
-    assert!(out.exists(), "the directory itself is the rsync destination");
+    assert!(
+        out.exists(),
+        "the directory itself is the rsync destination"
+    );
     assert_eq!(
         std::fs::read_dir(&out).unwrap().count(),
         0,
         "a run that produces nothing must not inherit the last one's results"
     );
-    assert!(tree.join("src.rs").exists(), "and nothing outside it is touched");
+    assert!(
+        tree.join("src.rs").exists(),
+        "and nothing outside it is touched"
+    );
 }
 
 #[test]
@@ -981,7 +1020,10 @@ fn the_results_channel_never_deletes() {
         "the guest is authoritative for what it produced, not for what was in \
          the operator's results directory beforehand"
     );
-    assert_eq!(plan.args[plan.args.len() - 2], "192.0.2.1:/pool/work/a-project/out/");
+    assert_eq!(
+        plan.args[plan.args.len() - 2],
+        "192.0.2.1:/pool/work/a-project/out/"
+    );
     assert_eq!(plan.args[plan.args.len() - 1], "/home/tree/out/");
 }
 
@@ -1026,7 +1068,10 @@ fn the_transport_wrapper_carries_the_same_options_ssh_uses() {
         "known-hosts",
         "/keys/session",
     ] {
-        assert!(text.contains(expected), "wrapper is missing {expected}:\n{text}");
+        assert!(
+            text.contains(expected),
+            "wrapper is missing {expected}:\n{text}"
+        );
     }
     // The address belongs to rsync, which appends it itself. Carrying it here
     // as well would hand ssh two hosts.
@@ -1054,7 +1099,10 @@ fn a_wrapper_path_with_whitespace_is_refused_rather_than_mangled() {
     );
     // And it must say what to do about it, since the cause is somewhere the
     // operator has never had to think about.
-    assert!(message.contains("XDG_STATE_HOME"), "no remedy offered: {message}");
+    assert!(
+        message.contains("XDG_STATE_HOME"),
+        "no remedy offered: {message}"
+    );
 }
 
 fn scratch(label: &str) -> Scratch {
@@ -1121,8 +1169,14 @@ const EXEC_PROBE_GUARD: &str = "if [ -n \"${REAPER_EXEC_PROBE:-}\" ]; then exit 
 /// belongs to somebody else's child.
 fn write_executable(path: &Path, body: &str) {
     let (shebang, rest) = body.split_once('\n').expect("a stub needs a shebang");
-    assert!(shebang.starts_with("#!"), "a stub needs a shebang: {shebang:?}");
-    write(path, format!("{shebang}\n{EXEC_PROBE_GUARD}{rest}").as_bytes());
+    assert!(
+        shebang.starts_with("#!"),
+        "a stub needs a shebang: {shebang:?}"
+    );
+    write(
+        path,
+        format!("{shebang}\n{EXEC_PROBE_GUARD}{rest}").as_bytes(),
+    );
 
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
@@ -1164,7 +1218,10 @@ fn a_real_round_trip_keeps_results_and_mirrors_deletions() {
 
     write(&tree.join("src/main.rs"), b"fn main() {}");
     write(&tree.join("doomed.txt"), b"here for now");
-    write(&tree.join("target/huge.o"), b"expensive and useless over there");
+    write(
+        &tree.join("target/huge.o"),
+        b"expensive and useless over there",
+    );
     // A nested results directory, which the anchored exclude must not catch.
     write(&tree.join("fixtures/out/case.json"), b"{}");
     // Uncommitted work, and git metadata: neither may be excluded by default.
@@ -1240,7 +1297,6 @@ fn a_real_round_trip_keeps_results_and_mirrors_deletions() {
         local_out.join("from-an-earlier-local-run.txt").exists(),
         "the results channel adds; it does not mirror"
     );
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1388,7 +1444,8 @@ fn put_executable_quotes_the_destination() {
     let dir = scratch_dir("putquote");
     let stub = dir.join("fake-ssh");
     let record = dir.join("argv");
-    write_executable(&stub,
+    write_executable(
+        &stub,
         &format!(
             "#!/bin/sh\nshift $(($# - 1))\nprintf '%s' \"$1\" > {} ; cat > /dev/null\n",
             crate::job::quote(record.to_str().unwrap())
@@ -1519,9 +1576,16 @@ fn a_failed_sync_surfaces_the_tools_own_stderr() {
     // destroyed; when it breaks, the person needs rsync's words, not ours.
     let dir = scratch_dir("syncfail");
     let stub = dir.join("fake-rsync");
-    write_executable(&stub, "#!/bin/sh\necho 'connection unexpectedly closed' >&2\nexit 23\n");
+    write_executable(
+        &stub,
+        "#!/bin/sh\necho 'connection unexpectedly closed' >&2\nexit 23\n",
+    );
     let ssh = crate::transport::Ssh::new(
-        "ssh", "root", "192.0.2.7".parse().unwrap(), None, dir.join("kh"),
+        "ssh",
+        "root",
+        "192.0.2.7".parse().unwrap(),
+        None,
+        dir.join("kh"),
         Duration::from_secs(15),
         Duration::from_secs(300),
     );
@@ -1567,7 +1631,10 @@ fn a_pre_epoch_time_is_clamped_to_zero_not_a_panic() {
     s.created_at = before;
     store.put(s).expect("stored");
     let got = store.get("alpha").unwrap().expect("still there");
-    assert_eq!(got.created_at, UNIX_EPOCH, "clamped, honestly, to the epoch");
+    assert_eq!(
+        got.created_at, UNIX_EPOCH,
+        "clamped, honestly, to the epoch"
+    );
 }
 
 #[test]
@@ -1611,7 +1678,10 @@ fn a_control_command_that_never_answers_is_given_up_on_and_killed() {
     // somebody to inspect a machine that is fine.
     let said = e.to_string();
     assert!(said.contains("stopped responding"), "{said}");
-    assert!(said.contains("io_timeout"), "say which knob owns it: {said}");
+    assert!(
+        said.contains("io_timeout"),
+        "say which knob owns it: {said}"
+    );
     assert!(
         waited < Duration::from_secs(5),
         "took {waited:?}, so the deadline is not being enforced"
@@ -1637,12 +1707,18 @@ fn a_failed_remote_command_reports_what_it_was_doing() {
     let stub = dir.join("fake-ssh");
     write_executable(&stub, "#!/bin/sh\necho 'the guest said no' >&2\nexit 9\n");
     let ssh = crate::transport::Ssh::new(
-        stub.to_str().unwrap(), "root", "192.0.2.7".parse().unwrap(), None,
-        dir.join("kh"), Duration::from_secs(15),
+        stub.to_str().unwrap(),
+        "root",
+        "192.0.2.7".parse().unwrap(),
+        None,
+        dir.join("kh"),
+        Duration::from_secs(15),
         Duration::from_secs(300),
     );
     use crate::transport::Transport;
-    let e = ssh.run("true", "checking the machine answers").expect_err("stub fails");
+    let e = ssh
+        .run("true", "checking the machine answers")
+        .expect_err("stub fails");
     let msg = e.to_string();
     assert!(msg.contains("checking the machine answers"), "{msg}");
     assert!(msg.contains("the guest said no"), "{msg}");
@@ -1654,17 +1730,31 @@ fn a_provider_without_diagnostics_says_so_rather_than_answering_ok() {
     // doctor -- but "nothing was checked" must never present as health.
     struct Bare;
     impl crate::provider::Provider for Bare {
-        fn name(&self) -> &'static str { "bare" }
-        fn create(&self, _: &crate::provider::CreateRequest) -> crate::provider::Result<crate::MachineRef> {
+        fn name(&self) -> &'static str {
+            "bare"
+        }
+        fn create(
+            &self,
+            _: &crate::provider::CreateRequest,
+        ) -> crate::provider::Result<crate::MachineRef> {
             unimplemented!()
         }
         fn set_expiry(&self, _: &crate::MachineRef, _: SystemTime) -> crate::provider::Result<()> {
             unimplemented!()
         }
-        fn start(&self, _: &crate::MachineRef) -> crate::provider::Result<()> { unimplemented!() }
-        fn stop(&self, _: &crate::MachineRef) -> crate::provider::Result<()> { unimplemented!() }
-        fn destroy(&self, _: &crate::MachineRef) -> crate::provider::Result<()> { unimplemented!() }
-        fn address(&self, _: &crate::MachineRef) -> crate::provider::Result<Option<std::net::IpAddr>> {
+        fn start(&self, _: &crate::MachineRef) -> crate::provider::Result<()> {
+            unimplemented!()
+        }
+        fn stop(&self, _: &crate::MachineRef) -> crate::provider::Result<()> {
+            unimplemented!()
+        }
+        fn destroy(&self, _: &crate::MachineRef) -> crate::provider::Result<()> {
+            unimplemented!()
+        }
+        fn address(
+            &self,
+            _: &crate::MachineRef,
+        ) -> crate::provider::Result<Option<std::net::IpAddr>> {
             unimplemented!()
         }
         fn list(&self) -> crate::provider::Result<Vec<crate::provider::MachineSummary>> {

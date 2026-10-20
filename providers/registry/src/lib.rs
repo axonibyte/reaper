@@ -33,7 +33,9 @@ pub const AVAILABLE: &[&str] = &["proxmox"];
 /// Build the named provider from its own slice of site configuration.
 pub fn build(name: &str, table: &toml::Value) -> Result<Box<dyn Provider>, ProviderError> {
     match name {
-        "proxmox" => Ok(Box::new(reaper_provider_proxmox::Proxmox::from_table(table)?)),
+        "proxmox" => Ok(Box::new(reaper_provider_proxmox::Proxmox::from_table(
+            table,
+        )?)),
         other => Err(ProviderError::Config(format!(
             "no provider named {other:?} in this build; available: {}",
             AVAILABLE.join(", ")
@@ -65,7 +67,9 @@ mod tests {
         for name in AVAILABLE {
             // Reaching configuration validation means the arm matched; an
             // empty table cannot get further than that, and does not need to.
-            if let Err(ProviderError::Config(m)) = build(name, &toml::Value::Table(Default::default())) {
+            if let Err(ProviderError::Config(m)) =
+                build(name, &toml::Value::Table(Default::default()))
+            {
                 assert!(!m.contains("no provider named"), "{name}: {m}");
             }
         }
