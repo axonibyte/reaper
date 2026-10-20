@@ -177,8 +177,8 @@ importable_from() {
 # A GPT that GEOM recovered from its SECONDARY table is residue, not data --
 # and FreeBSD is the only platform here that can see it.
 #
-# The provider asks Proxmox for a blank volume and gets one whose blocks were
-# recycled from a destroyed session's pool: the primary GPT is gone, the backup
+# The provider asks for a blank volume and gets one whose blocks the storage
+# behind it recycled from a destroyed session's pool: the primary GPT is gone, the backup
 # in the final sector survives, GEOM falls back to it and reports the disk as
 # partitioned. So `gpart show` SUCCEEDS, this rule refused the only disk the
 # provider attached, candidates came back empty, and firstboot died with "no

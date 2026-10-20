@@ -447,8 +447,8 @@ errsays 'no unused disk'
 made_no_pool
 
 new_case "freebsd: a GPT recovered from its secondary is residue, and the pool is built on it"
-# THE REGRESSION. A session volume whose blocks Proxmox recycled from a
-# destroyed pool: the primary GPT is gone, the backup in the last sector
+# THE REGRESSION. A session volume whose blocks the provider's storage
+# recycled from a destroyed pool: the primary GPT is gone, the backup in the last sector
 # survives, GEOM falls back to it, and `gpart show` therefore SUCCEEDS. The old
 # rule read that success as "has a partition table" and refused the only disk
 # the provider had attached -- candidates came back empty and firstboot died
