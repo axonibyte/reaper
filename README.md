@@ -298,10 +298,16 @@ name = "integration"
 cmd = "cargo test --test integration"
 ```
 
-A job inherits every key of `run` it does not restate, collects into
-`out/<job>/`, and costs a session -- so how many run at once is the site's
+Those two run at the same time, on machines of their own. A job inherits every
+key of `run` it does not restate, collects into `out/<job>/`, and costs a
+session -- so how many can be up at once is the site's
 `session.max_concurrent`, counted across the provider. Each job's machine runs
 the build too, because each needs its own binaries.
+
+Several commands cannot share one terminal, so each session's output goes to
+`out/<job>/run.log` instead, arriving on the same channel as the rest of your
+results: `tail -f` is the live view. A project declaring no jobs keeps one
+session with its output live in your terminal, exactly as before.
 
 Worked examples: [`manifest/examples/`](manifest/examples/). Full contract:
 [`docs/tenants.md`](docs/tenants.md).

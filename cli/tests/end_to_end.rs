@@ -96,6 +96,25 @@ for a in "$@"; do
             fi ;;
         *"runner.sh snapshot"*)
             printf 'snapshot=tank/state@pristine\n' ;;
+        *"runner.sh exec"*)
+            # The overlap instrument, and only when a test asks for it.
+            #
+            # It records entry and exit around a deliberate pause, so a test
+            # can tell "these two ran at the same time" from "these two ran one
+            # after the other" by READING THE ORDER rather than by measuring a
+            # clock. A wall-time assertion on a loaded machine is a test that
+            # fails for reasons that have nothing to do with the claim.
+            if [ -f "${here}/trace-exec" ]; then
+                sess=''
+                for b in "$@"; do
+                    case "${b}" in
+                        UserKnownHostsFile=*known-hosts-*) sess=${b##*known-hosts-} ;;
+                    esac
+                done
+                printf 'ENTER %s\n' "${sess}" >> "${here}/exec.trace"
+                sleep 1
+                printf 'LEAVE %s\n' "${sess}" >> "${here}/exec.trace"
+            fi ;;
     esac
 done
 # Refuses the first N invocations and then works, so a test can model a machine
@@ -3212,4 +3231,140 @@ cmd = "make check"
         "and nothing may have been created: {:?}",
         h.machines()
     );
+}
+
+/// Does the work actually happen at the same time?
+///
+/// Asserted by overlap rather than by wall time. The stand-in records ENTER
+/// and LEAVE around a pause, so two sessions running together produce two
+/// ENTERs before either LEAVE, and two sessions running in turn produce
+/// ENTER/LEAVE twice. Either way the test reads an order, and never a clock.
+#[test]
+fn jobs_run_at_the_same_time() {
+    let h = Harness::new("jobspar");
+    h.set_cap(4);
+    write(&h.dir.join(".reaper.toml"), JOBS, None);
+    h.ok(&["up"]);
+    h.ok(&["sync"]);
+
+    write(&h.dir.join("trace-exec"), "", None);
+    h.ok(&["run"]);
+
+    let trace = h.log("exec.trace");
+    let lines: Vec<&str> = trace.lines().collect();
+    assert_eq!(lines.len(), 4, "two sessions, entered and left: {trace}");
+    assert!(
+        lines[0].starts_with("ENTER") && lines[1].starts_with("ENTER"),
+        "both jobs are inside the command before either leaves -- \
+         sequentially this reads ENTER/LEAVE/ENTER/LEAVE: {trace}"
+    );
+
+    h.ok(&["down"]);
+}
+
+/// And a manifest that declares no jobs keeps running one session at a time,
+/// with the command's output on the terminal. Two guests have always behaved
+/// that way and nothing about jobs is a reason to take it away.
+#[test]
+fn guests_without_jobs_still_run_one_at_a_time() {
+    let h = Harness::new("guestseq");
+    h.add_guest("b-guest");
+    write(&h.dir.join(".reaper.toml"), TWO_GUESTS, None);
+    h.ok(&["up"]);
+    h.ok(&["sync"]);
+
+    write(&h.dir.join("trace-exec"), "", None);
+    h.ok(&["run"]);
+
+    let trace = h.log("exec.trace");
+    let lines: Vec<&str> = trace.lines().collect();
+    assert_eq!(lines.len(), 4, "two sessions: {trace}");
+    assert!(
+        lines[0].starts_with("ENTER") && lines[1].starts_with("LEAVE"),
+        "one finishes before the next starts: {trace}"
+    );
+
+    h.ok(&["down"]);
+}
+
+/// Several commands cannot share one terminal, so a concurrent verb sends each
+/// session's output to a file on the guest, inside the results directory that
+/// is already being pulled back every few seconds. The second half of the
+/// claim is the one that protects existing projects: a single session is not
+/// redirected, and keeps its output live where it has always been.
+#[test]
+fn a_concurrent_run_sends_each_sessions_output_to_its_own_log() {
+    let h = Harness::new("joblogs");
+    h.set_cap(4);
+    write(&h.dir.join(".reaper.toml"), JOBS, None);
+    h.ok(&["up"]);
+    h.ok(&["sync"]);
+
+    let out = h.ok(&["run"]);
+    let ssh = h.log("ssh.log");
+    let execs: Vec<&str> = ssh
+        .lines()
+        .filter(|l| l.contains("runner.sh exec"))
+        .collect();
+    assert_eq!(execs.len(), 2, "one exec per session: {ssh}");
+    for line in &execs {
+        assert!(
+            line.contains("/out/run.log' 2>&1"),
+            "redirected into the results directory, stderr with it -- the \
+             runner's own announcements belong in the same file: {line}"
+        );
+    }
+    // And the operator is told where it went, since it is not in front of them.
+    assert!(
+        out.contains("out/fast/run.log") && out.contains("out/slow/run.log"),
+        "name each log, with the job's own directory: {out}"
+    );
+
+    h.ok(&["down"]);
+}
+
+#[test]
+fn a_single_session_keeps_its_output_on_the_terminal() {
+    let h = Harness::new("onelog");
+    h.ok(&["up"]);
+    h.ok(&["sync"]);
+    h.ok(&["run"]);
+
+    let ssh = h.log("ssh.log");
+    let execs: Vec<&str> = ssh
+        .lines()
+        .filter(|l| l.contains("runner.sh exec"))
+        .collect();
+    assert_eq!(execs.len(), 1, "{ssh}");
+    assert!(
+        !execs[0].contains("run.log"),
+        "nothing is redirected: there is one command and a terminal to show \
+         it in: {}",
+        execs[0]
+    );
+
+    h.ok(&["down"]);
+}
+
+/// A failed session under capture must say where its output went, or the
+/// failure arrives with no trace attached -- which is strictly worse than the
+/// sequential case it replaces.
+#[test]
+fn a_failed_job_names_the_log_its_output_went_to() {
+    let h = Harness::new("joblogfail");
+    h.set_cap(4);
+    write(&h.dir.join(".reaper.toml"), JOBS, None);
+    h.ok(&["up"]);
+    h.ok(&["sync"]);
+
+    // Both sessions' commands fail: the pattern matches every exec.
+    write(&h.dir.join("ssh.fail"), "runner.sh exec", None);
+    let err = h.fails(&["run"]);
+    assert!(
+        err.contains("out/fast/run.log") && err.contains("out/slow/run.log"),
+        "each failure names its own log: {err}"
+    );
+
+    let _ = std::fs::remove_file(h.dir.join("ssh.fail"));
+    h.ok(&["down"]);
 }

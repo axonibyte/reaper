@@ -152,7 +152,9 @@ env = { CI = "1", SHARD = "2" }
 
 That is two machines, each running `make check` with a different `SHARD`, and
 each collecting into `out/shard-1/` and `out/shard-2/`. Every verb acts on both,
-exactly as it acts on every guest.
+exactly as it acts on every guest -- and **at the same time**, which is the
+point: a suite split into four pieces that still takes four hours has solved
+nothing.
 
 A job inherits every key of `run` it does not restate -- `cmd`, `exec`, `image`,
 `env` -- so jobs that differ only in their environment say only that. Jobs that
@@ -184,6 +186,28 @@ is cloned. A job is a *piece of the work*. Two guests and three jobs is six
 sessions, named `{project}-{guest}-{job}`; one guest and three jobs is three,
 named `{project}-{job}`. A manifest declaring no jobs keeps the session names
 and the `out/` layout it has always had.
+
+### Where the output goes
+
+Several commands cannot share one terminal. Interleaved, two sessions' output is
+worse than either alone, and attributing a line to a machine afterwards is
+guesswork. So a verb running several sessions at once sends each one's output to
+`<job>.log` **inside that session's results directory** -- `out/shard-1/run.log`,
+`out/shard-1/build.log` -- rather than to your terminal.
+
+Which means it arrives the way everything else in `out/` arrives: pulled back
+every few seconds while the command runs, once more when it stops, and once more
+when the session is taken down. `tail -f out/shard-1/run.log` is the live view,
+and the file is there afterwards whether the command passed or failed. A session
+that fails names its own log in the failure.
+
+Your terminal still gets reaper's own narration -- which session started what,
+which finished, which failed -- one line at a time and never half a line from
+two sessions at once.
+
+**A project that declares no jobs is not redirected.** One session, one
+terminal, output live in it, exactly as before. Nothing about jobs is a reason
+to take that away from a manifest that did not ask for them.
 
 ### How many run at once
 
@@ -379,7 +403,9 @@ command as well.
 
 Not at the end. A trace is fetched back every few seconds for as long as your
 command runs, once more when it stops -- whether it passed or failed -- and once
-more when you take the session down. A failure trace that exists only on a
+more when you take the session down. Where jobs are running this channel carries
+the command's own output too, which is what makes `tail -f` on a log work at
+all. A failure trace that exists only on a
 machine scheduled for destruction is a failure trace nobody reads, and the runs
 worth investigating are exactly the ones that end with somebody giving up.
 

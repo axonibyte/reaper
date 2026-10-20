@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -1306,13 +1306,21 @@ pub fn sync(session: Option<String>, manifest_path: Option<PathBuf>) -> Result<(
 
     // Per session, to the end: an unreachable machine costs itself, never
     // its siblings their copy of the tree.
-    let mut failures = 0;
-    for s in implied_sessions(&store, session, Some(&manifest.project))? {
+    //
+    // At once where the project declares jobs, for the reason given in `exec`:
+    // several sessions each waiting on their own rsync is several waits that
+    // did not have to be taken one after another, and this direction has no
+    // terminal output to interleave -- rsync's own is captured either way.
+    let sessions = implied_sessions(&store, session, Some(&manifest.project))?;
+    let concurrent = sessions.len() > 1 && sessions.iter().any(|s| s.job.is_some());
+
+    let failures = AtomicUsize::new(0);
+    let one = |s: &Session| {
         let attempt = || -> Result<()> {
             // Renewed only while THIS session's work runs, and stopped when it
             // returns. Nothing renews between commands.
             let _renewing = Renewing::during(&cfg, &s.name);
-            let ssh = ssh_for(&cfg, &s)?;
+            let ssh = ssh_for(&cfg, s)?;
             deliver_runner(&ssh)?;
             let (work, results) = workspace(&ssh, &manifest.project)?;
             let rsh = sync::rsh_wrapper(&ssh, &state_file(&s.name, "rsh")?)?;
@@ -1343,18 +1351,32 @@ pub fn sync(session: Option<String>, manifest_path: Option<PathBuf>) -> Result<(
 
             // And straight back, so a session that already holds results hands
             // them over on the first sync rather than waiting for a run.
-            results_plan(&cfg, &ssh, &rsh, &s, &results, &tree)?.run()?;
+            results_plan(&cfg, &ssh, &rsh, s, &results, &tree)?.run()?;
             say!("{}: synced", s.name);
             Ok(())
         };
         if let Err(e) = attempt() {
-            failures += 1;
+            failures.fetch_add(1, Ordering::Relaxed);
             warn_line!("{}: could not sync: {e}", s.name);
-            if let Some(note) = expiry_note(&s) {
+            if let Some(note) = expiry_note(s) {
                 warn_line!("{note}");
             }
         }
+    };
+
+    if concurrent {
+        std::thread::scope(|scope| {
+            for s in &sessions {
+                scope.spawn(move || one(s));
+            }
+        });
+    } else {
+        for s in &sessions {
+            one(s);
+        }
     }
+
+    let failures = failures.load(Ordering::Relaxed);
     if failures > 0 {
         return Err(format!("{failures} session(s) could not be synced").into());
     }
@@ -1706,11 +1728,27 @@ pub fn exec(
         every_job_has_a_session(&manifest, &sessions)?;
     }
 
-    let mut failures = 0;
+    // Everything the verb needs, resolved for every session before any of them
+    // is touched.
+    //
+    // These are refusals about the request rather than failures of one machine
+    // -- a session whose guest or job the manifest no longer describes, one
+    // that has never been synced -- and they used to be found mid-loop, which
+    // on a two-session project meant the first session had already run and the
+    // verb then threw its output away. Asked here, nothing has been spent when
+    // the answer is no. It is also what lets the work below run concurrently:
+    // a thread cannot refuse on the whole verb's behalf.
+    struct Work<'m> {
+        s: Session,
+        g: &'m reaper_manifest::Guest,
+        image: Option<&'m String>,
+        caches: Vec<String>,
+        warm: bool,
+        script: String,
+    }
+
+    let mut work: Vec<Work> = Vec::new();
     for s in sessions {
-        // Renewed only while THIS session's work runs, and stopped when it
-        // returns. Nothing renews between commands.
-        let _renewing = Renewing::during(&cfg, &s.name);
         // Nothing has ever been pushed, so the workspace is empty; a build
         // has nothing to compile and a run's "success" would be meaningless
         // -- and on a project with reset datasets, that success would take
@@ -1758,10 +1796,7 @@ pub fn exec(
                 // The nothing-to-build-anywhere case was refused before the
                 // loop, so silence here never means "did nothing at all".
                 None => {
-                    say!(
-                        "{}: {} declares no build; skipping",
-                        s.name, g.name
-                    );
+                    say!("{}: {} declares no build; skipping", s.name, g.name);
                     continue;
                 }
             },
@@ -1772,9 +1807,9 @@ pub fn exec(
         // Asserting it here costs a line and turns an impossible state into a
         // sentence rather than into an argument the runner would refuse.
         let image = match mode {
-            Exec::Container => Some(image.ok_or_else(|| {
-                format!("{}: container execution with no image", g.name)
-            })?),
+            Exec::Container => Some(
+                image.ok_or_else(|| format!("{}: container execution with no image", g.name))?,
+            ),
             Exec::Host => None,
         };
 
@@ -1784,11 +1819,62 @@ pub fn exec(
         // names instead -- which this did first -- broke every command that
         // referred to a cache path, which is the documented way to use one.
         let warm = profile.and_then(|p| p.warm_cache) != Some(false);
-        let caches: Vec<String> =
-            g.build.as_ref().map(|b| b.cache.clone()).unwrap_or_default();
+        let caches: Vec<String> = g.build.as_ref().map(|b| b.cache.clone()).unwrap_or_default();
 
         let env: BTreeMap<String, String> = job::overlay(verb_env, profile.map(|p| &p.env));
         let script = job::render(cmd, &env);
+
+        work.push(Work {
+            s,
+            g,
+            image,
+            caches,
+            warm,
+            script,
+        });
+    }
+
+    // Whether these happen at once, and the rule behind it: A MANIFEST THAT
+    // DECLARES JOBS ASKED FOR THEM TOGETHER. That is what declaring them
+    // means -- a suite split into four pieces that still takes four hours to
+    // run is the entire problem jobs exist to solve. A manifest that declares
+    // none behaves exactly as it did, one session after another with the
+    // command's output live on the terminal, because nothing about guests ever
+    // promised otherwise and taking that away would be a change nobody asked
+    // for.
+    //
+    // Unbounded on purpose. The figure that rations machines is
+    // session.max_concurrent and it was spent at `up`: every session here
+    // already exists, so bounding this would only make an operator wait for
+    // machines they are already paying for. What it costs locally is an ssh
+    // client and an rsync per session.
+    let concurrent = work.len() > 1 && work.iter().any(|w| w.s.job.is_some());
+
+    let failures = AtomicUsize::new(0);
+    let one = |w: &Work| {
+        let s = &w.s;
+        // Renewed only while THIS session's work runs, and stopped when it
+        // returns. Nothing renews between commands.
+        let _renewing = Renewing::during(&cfg, &s.name);
+
+        // Where this session's output will be, when it is not the terminal.
+        //
+        // One terminal cannot show several commands at once; interleaved they
+        // are worse than either alone, and attributing a line to a machine
+        // afterwards is guesswork. So a concurrent verb sends each session's
+        // output to a file in that session's own results directory ON THE
+        // GUEST -- which means it comes back on the channel that is already
+        // running, every few seconds while the command runs and once more when
+        // it stops. `tail -f` on the workstation's copy is the live view, and
+        // the file is there afterwards whether the command passed or failed.
+        let log = concurrent.then(|| {
+            let mut p = PathBuf::from(sync::RESULTS);
+            if let Some(d) = results_subdir(s) {
+                p.push(d);
+            }
+            p.push(format!("{}.log", which.label()));
+            p
+        });
 
         // Everything from here on is one session's business. A failure --
         // unreachable machine, failed command, broken results channel --
@@ -1797,109 +1883,152 @@ pub fn exec(
         // cancelling every other session's run was the multi-session bug
         // this file kept re-growing.
         let attempt = || -> Result<()> {
-        let ssh = ssh_for(&cfg, &s)?;
-        deliver_runner(&ssh)?;
-        let (_, results) = workspace(&ssh, &manifest.project)?;
-        // Over stdin, as a file. Never as a quoted argument: a command
-        // containing an apostrophe passed inline closes the quote, and the rest
-        // of it then runs somewhere nobody intended.
-        ssh.put_executable(script.as_bytes(), JOB_PATH)?;
+            let ssh = ssh_for(&cfg, s)?;
+            deliver_runner(&ssh)?;
+            let (_, results) = workspace(&ssh, &manifest.project)?;
+            // Over stdin, as a file. Never as a quoted argument: a command
+            // containing an apostrophe passed inline closes the quote, and the
+            // rest of it then runs somewhere nobody intended.
+            ssh.put_executable(w.script.as_bytes(), JOB_PATH)?;
 
-        let mut command = format!(
-            "{RUNNER_PATH} exec --project {} --job {JOB_PATH}",
-            manifest.project
-        );
-        if let Some(i) = image {
-            command.push_str(&format!(" --image {i}"));
-        }
-        for c in &caches {
-            command.push_str(&format!(" --cache {c}"));
-        }
-        if !warm {
-            command.push_str(" --cold");
-        }
+            let mut command = format!(
+                "{RUNNER_PATH} exec --project {} --job {JOB_PATH}",
+                manifest.project
+            );
+            if let Some(i) = w.image {
+                command.push_str(&format!(" --image {i}"));
+            }
+            for c in &w.caches {
+                command.push_str(&format!(" --cache {c}"));
+            }
+            if !w.warm {
+                command.push_str(" --cold");
+            }
+            // Redirected by the remote shell rather than captured here: the
+            // runner's own announcements go to stderr and belong in the same
+            // file as the command's output, and a pipe read on this side would
+            // have to be drained by a thread per session to avoid filling.
+            if log.is_some() {
+                let remote = format!("{results}/{}.log", which.label());
+                command = format!("{command} > {} 2>&1", job::quote(&remote));
+            }
 
-        let rsh = sync::rsh_wrapper(&ssh, &state_file(&s.name, "rsh")?)?;
-        let plan = results_plan(&cfg, &ssh, &rsh, &s, &results, &tree)?;
+            let rsh = sync::rsh_wrapper(&ssh, &state_file(&s.name, "rsh")?)?;
+            let plan = results_plan(&cfg, &ssh, &rsh, s, &results, &tree)?;
 
-        say!(
-            "{}: {} on {}{}",
-            s.name,
-            which.label(),
-            g.name,
-            if warm { "" } else { " (cold)" }
-        );
+            let cold = if w.warm { "" } else { " (cold)" };
+            match &log {
+                Some(p) => say!(
+                    "{}: {} on {}{} -- output to {}",
+                    s.name,
+                    which.label(),
+                    w.g.name,
+                    cold,
+                    p.display()
+                ),
+                None => say!("{}: {} on {}{}", s.name, which.label(), w.g.name, cold),
+            }
 
-        // Results flow while the command runs, not after it. A failure trace
-        // must never exist only on a machine scheduled for destruction, and the
-        // interesting failures are the ones that end with the operator giving
-        // up and running `down`.
-        let stop = Arc::new(AtomicBool::new(false));
-        let collector = {
-            let plan = plan.clone();
-            let stop = Arc::clone(&stop);
-            let interval = cfg.session.results_interval;
-            let name = s.name.clone();
-            std::thread::spawn(move || {
-                let mut complained = false;
-                while !stop.load(Ordering::Relaxed) {
-                    // Slept in slices so that stopping is prompt: the interval
-                    // is minutes-scale in some configurations, and a command
-                    // that finished should not wait one out.
-                    let slice = Duration::from_millis(200);
-                    let mut waited = Duration::ZERO;
-                    while waited < interval && !stop.load(Ordering::Relaxed) {
-                        std::thread::sleep(slice);
-                        waited += slice;
-                    }
-                    if stop.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    if let Err(e) = plan.run() {
-                        // Once. A broken channel would otherwise print on every
-                        // tick and bury the output of the command itself.
-                        if !complained {
-                            warn_line!("{name}: results are not coming back: {e}");
-                            complained = true;
+            // Results flow while the command runs, not after it. A failure
+            // trace must never exist only on a machine scheduled for
+            // destruction, and the interesting failures are the ones that end
+            // with the operator giving up and running `down`. Under capture
+            // this channel carries the output itself, which is what makes the
+            // live view possible at all.
+            let stop = Arc::new(AtomicBool::new(false));
+            let collector = {
+                let plan = plan.clone();
+                let stop = Arc::clone(&stop);
+                let interval = cfg.session.results_interval;
+                let name = s.name.clone();
+                std::thread::spawn(move || {
+                    let mut complained = false;
+                    while !stop.load(Ordering::Relaxed) {
+                        // Slept in slices so that stopping is prompt: the
+                        // interval is minutes-scale in some configurations,
+                        // and a command that finished should not wait one out.
+                        let slice = Duration::from_millis(200);
+                        let mut waited = Duration::ZERO;
+                        while waited < interval && !stop.load(Ordering::Relaxed) {
+                            std::thread::sleep(slice);
+                            waited += slice;
+                        }
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        if let Err(e) = plan.run() {
+                            // Once. A broken channel would otherwise print on
+                            // every tick and bury the output of the command
+                            // itself.
+                            if !complained {
+                                warn_line!("{name}: results are not coming back: {e}");
+                                complained = true;
+                            }
                         }
                     }
+                })
+            };
+
+            let outcome = ssh.run_live(&command, which.label());
+            stop.store(true, Ordering::Relaxed);
+            let _ = collector.join();
+
+            // The last pass happens whatever the command did, and before its
+            // failure is reported: a failed run is exactly when its trace
+            // matters.
+            let collected = plan.run();
+
+            match (outcome, collected) {
+                (Err(e), pulled) => {
+                    if let Err(p) = pulled {
+                        warn_line!("{}: results could not be collected: {p}", s.name);
+                    }
+                    return Err(e.into());
                 }
-            })
+                (Ok(()), Err(p)) => return Err(p.into()),
+                (Ok(()), Ok(_)) => {
+                    say!("{}: {} finished", s.name, which.label());
+                    if which == Verb::Run {
+                        take_pristine(&ssh, &s.name, &manifest);
+                    }
+                }
+            }
+            Ok(())
         };
 
-        let outcome = ssh.run_live(&command, which.label());
-        stop.store(true, Ordering::Relaxed);
-        let _ = collector.join();
-
-        // The last pass happens whatever the command did, and before its
-        // failure is reported: a failed run is exactly when its trace matters.
-        let collected = plan.run();
-
-        match (outcome, collected) {
-            (Err(e), pulled) => {
-                if let Err(p) = pulled {
-                    warn_line!("{}: results could not be collected: {p}", s.name);
-                }
-                return Err(e.into());
-            }
-            (Ok(()), Err(p)) => return Err(p.into()),
-            (Ok(()), Ok(_)) => {
-                say!("{}: {} finished", s.name, which.label());
-                if which == Verb::Run {
-                    take_pristine(&ssh, &s.name, &manifest);
-                }
-            }
-        }
-        Ok(())
-        };
         if let Err(e) = attempt() {
-            failures += 1;
+            failures.fetch_add(1, Ordering::Relaxed);
             warn_line!("{}: {} failed: {e}", s.name, which.label());
-            if let Some(note) = expiry_note(&s) {
+            // The output did not go to the terminal, so the failure has to say
+            // where it did go, or it is a failure with no trace attached.
+            if let Some(p) = &log {
+                warn_line!("{}: what it printed is in {}", s.name, p.display());
+            }
+            if let Some(note) = expiry_note(s) {
                 warn_line!("{note}");
             }
         }
+    };
+
+    if concurrent {
+        say!(
+            "{}: {} on {} sessions at once",
+            manifest.project,
+            which.label(),
+            work.len()
+        );
+        std::thread::scope(|scope| {
+            for w in &work {
+                scope.spawn(move || one(w));
+            }
+        });
+    } else {
+        for w in &work {
+            one(w);
+        }
     }
+
+    let failures = failures.load(Ordering::Relaxed);
     if failures > 0 {
         return Err(format!("{failures} session(s) failed to {}", which.label()).into());
     }
