@@ -1,0 +1,20 @@
+# Two jobs, one name. A job's name is its session's name and the directory its
+# results come back in, so this is two machines writing one directory and the
+# second entry losing everywhere downstream -- the same failure duplicate guest
+# names have. uniqueItems cannot see it: the entries differ in their commands.
+
+schema = 1
+project = "collide"
+guests = ["some-guest"]
+exec = "host"
+
+[run]
+cmd = "make check"
+
+[[run.jobs]]
+name = "slow"
+cmd = "make slow"
+
+[[run.jobs]]
+name = "slow"
+cmd = "make slower"

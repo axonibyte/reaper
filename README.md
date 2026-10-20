@@ -30,6 +30,7 @@ Fixed, because the three components are easy to conflate:
 | **cull** | The independent TTL sweep, deployed on its own machine |
 | **tenant** | A project consuming the framework. Its integration surface is one manifest file |
 | **guest** | A blessed VM template a tenant can run on |
+| **job** | One piece of a tenant's run, with a session of its own. A run that declares none is one job |
 | **provider** | The hypervisor plugin that creates and destroys machines |
 
 ## Architecture
@@ -280,6 +281,27 @@ Three things to get right, because they are where projects actually stumble:
 - **Images are digest-pinned.** Tags are refused outright, including
   `repo:tag@sha256:…`, where the tag is unverified and can drift away from the
   digest while looking checked.
+
+A suite too long for one run splits into **jobs**, each getting a machine of its
+own and running at the same time as its siblings:
+
+```toml
+[run]
+cmd = "cargo test --workspace"
+
+[[run.jobs]]
+name = "unit"
+env = { SHARD = "1" }
+
+[[run.jobs]]
+name = "integration"
+cmd = "cargo test --test integration"
+```
+
+A job inherits every key of `run` it does not restate, collects into
+`out/<job>/`, and costs a session -- so how many run at once is the site's
+`session.max_concurrent`, counted across the provider. Each job's machine runs
+the build too, because each needs its own binaries.
 
 Worked examples: [`manifest/examples/`](manifest/examples/). Full contract:
 [`docs/tenants.md`](docs/tenants.md).

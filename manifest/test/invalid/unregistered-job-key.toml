@@ -1,0 +1,16 @@
+# A typoed key inside a job, which must be refused rather than silently
+# ignored. `parallel` is the one worth naming: how many jobs run at once is the
+# site's session.max_concurrent, because the resource being rationed is the
+# cluster's, and a manifest that thought it could say otherwise should hear so.
+
+schema = 1
+project = "typo"
+guests = ["some-guest"]
+exec = "host"
+
+[run]
+cmd = "make check"
+
+[[run.jobs]]
+name = "slow"
+parallel = 4

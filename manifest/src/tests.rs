@@ -53,6 +53,25 @@ fn fixture(rel: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
 }
 
+/// The one job a manifest that declares none resolves to.
+///
+/// Asserted rather than indexed. Every caller below was written before jobs
+/// existed, so what each of them now also checks is that such a manifest still
+/// resolves to exactly one job carrying no name -- which is the whole of the
+/// backwards-compatibility claim, and is worth re-stating at every site that
+/// depends on it rather than once somewhere else.
+fn sole_job(g: &Guest) -> &Job {
+    assert_eq!(
+        g.run.jobs.len(),
+        1,
+        "{}: a run declaring no jobs resolves to exactly one",
+        g.name
+    );
+    let j = &g.run.jobs[0];
+    assert_eq!(j.name, None, "{}: the implicit job carries no name", g.name);
+    j
+}
+
 fn load_ok(rel: &str) -> Manifest {
     load(&fixture(rel)).unwrap_or_else(|e| panic!("{rel} should load: {e}"))
 }
@@ -117,8 +136,19 @@ fn every_example_verb_agrees_with_its_execution_mode() {
             if let Some(b) = &g.build {
                 coherent(&format!("{} build", g.name), b.exec, b.image.as_ref());
             }
-            coherent(&format!("{} run", g.name), g.run.exec, g.run.image.as_ref());
-            assert!(!g.run.cmd.is_empty());
+            assert!(
+                !g.run.jobs.is_empty(),
+                "{}: a resolved run always has a job",
+                g.name
+            );
+            for j in &g.run.jobs {
+                let what = match &j.name {
+                    Some(n) => format!("{} run job {n}", g.name),
+                    None => format!("{} run", g.name),
+                };
+                coherent(&what, j.exec, j.image.as_ref());
+                assert!(!j.cmd.is_empty(), "{what}: a job without a command");
+            }
         }
     }
 }
@@ -288,12 +318,12 @@ fn a_verb_may_override_the_guests_execution_mode() {
 
     assert_eq!(g.exec, Some(Exec::Container), "the guest's default");
     assert_eq!(g.build.as_ref().unwrap().exec, Exec::Container);
-    assert_eq!(g.run.exec, Exec::Host, "the run overrode it");
+    assert_eq!(sole_job(g).exec, Exec::Host, "the run overrode it");
 
     // And the override does not drag an image along with it.
     assert!(g.build.as_ref().unwrap().image.is_some());
     assert_eq!(
-        g.run.image, None,
+        sole_job(g).image, None,
         "a host-execution run has nowhere to run an image, so it must not \
          inherit one -- it would then be rejected for a key nobody wrote"
     );
@@ -308,8 +338,192 @@ fn a_container_run_inherits_the_build_image() {
 
     assert!(build_image.is_some());
     assert_eq!(
-        g.run.image, build_image,
+        sole_job(g).image, build_image,
         "the run declared no image of its own, so it runs in the build's"
+    );
+}
+
+/// The axis a tenant was previously buying a second manifest to get: one
+/// command, several shards, each on its own session.
+#[test]
+fn jobs_shard_one_command_across_sessions() {
+    let m = load_ok("test/valid/run-jobs.toml");
+    let g = &m.guests[0];
+
+    let names: Vec<Option<&str>> = g.run.jobs.iter().map(|j| j.name.as_deref()).collect();
+    assert_eq!(
+        names,
+        vec![
+            Some("shard-1"),
+            Some("shard-2"),
+            Some("shard-3"),
+            Some("shard-4")
+        ],
+        "declaration order is kept: it is the order sessions are named in"
+    );
+
+    for j in &g.run.jobs {
+        assert_eq!(j.cmd, "make check", "every shard inherits the run's command");
+        assert_eq!(j.exec, Exec::Host, "and the guest's execution mode");
+        assert_eq!(j.image, None);
+    }
+
+    // env is replaced whole rather than merged, exactly as a guest's override
+    // of `run` is. The fixture restates CI in every shard for that reason, and
+    // this is the assertion that would fail if someone made it merge -- which
+    // would be a second answer to a question the manifest already answers.
+    let shard = |n: &str| {
+        g.job(Some(n))
+            .unwrap_or_else(|| panic!("no job {n}"))
+            .env
+            .clone()
+    };
+    assert_eq!(shard("shard-1").get("SHARD").map(String::as_str), Some("1"));
+    assert_eq!(shard("shard-4").get("SHARD").map(String::as_str), Some("4"));
+    assert_eq!(
+        shard("shard-2").get("CI").map(String::as_str),
+        Some("1"),
+        "restated by the shard, so present"
+    );
+    assert_eq!(
+        shard("shard-2").len(),
+        2,
+        "and nothing else arrived from the run"
+    );
+}
+
+/// Jobs are not only shards of one command: they may differ in command,
+/// execution mode and toolchain. The last of those is the interesting one,
+/// because image inheritance has to be decided per job rather than once for
+/// the run -- a host-execution job must not be handed an image it has nowhere
+/// to run, and would then be rejected for a key the tenant never wrote.
+#[test]
+fn a_job_may_differ_in_command_mode_and_toolchain() {
+    let m = load_ok("test/valid/jobs-that-differ.toml");
+    let g = &m.guests[0];
+    let build_image = g.build.as_ref().unwrap().image.clone();
+    assert!(build_image.is_some());
+
+    let unit = g.job(Some("unit")).expect("unit");
+    assert_eq!(unit.cmd, "make check", "inherited from the run");
+    assert_eq!(unit.exec, Exec::Container);
+    assert_eq!(unit.image, build_image, "and the build's toolchain with it");
+
+    let integration = g.job(Some("integration")).expect("integration");
+    assert_eq!(integration.cmd, "make integration");
+    assert!(integration.image.as_deref().unwrap().contains("driver"));
+
+    let e2e = g.job(Some("e2e")).expect("e2e");
+    assert_eq!(e2e.exec, Exec::Host, "overrode the guest's mode");
+    assert_eq!(
+        e2e.image, None,
+        "a host-execution job has nowhere to run an image, so it must not \
+         inherit one -- not even one its siblings are using"
+    );
+}
+
+/// The backwards-compatibility claim, stated once on its own rather than only
+/// as a side effect of `sole_job`: a manifest written before jobs existed
+/// resolves to one job, it carries no name, and it carries the run's command.
+#[test]
+fn a_run_declaring_no_jobs_resolves_to_exactly_one_unnamed_job() {
+    let m = load_ok("test/valid/minimal.toml");
+    let g = &m.guests[0];
+    let j = sole_job(g);
+    assert!(!j.cmd.is_empty());
+    assert!(
+        g.job(None).is_some(),
+        "and it is reachable as the implicit job"
+    );
+    assert!(
+        g.job(Some("")).is_none(),
+        "which is not the same as a job named with the empty string"
+    );
+}
+
+/// A guest's override of `run` replaces its keys whole, `jobs` included. Two
+/// guests may therefore shard differently -- a slow platform into more pieces
+/// than a fast one -- and a guest that restates `jobs` does not accumulate the
+/// top level's.
+#[test]
+fn a_guests_jobs_replace_the_top_levels() {
+    let m = load_str(
+        r#"
+schema = 1
+project = "mixed"
+guests = [
+  "fast",
+  { name = "slow", run = { jobs = [ { name = "a" }, { name = "b" }, { name = "c" } ] } },
+]
+exec = "host"
+
+[run]
+cmd = "make check"
+
+[[run.jobs]]
+name = "whole"
+"#,
+    );
+
+    let fast = m.guest("fast").expect("fast");
+    assert_eq!(
+        fast.run.jobs.len(),
+        1,
+        "the guest that overrode nothing keeps the top level's single job"
+    );
+    assert_eq!(fast.run.jobs[0].name.as_deref(), Some("whole"));
+
+    let slow = m.guest("slow").expect("slow");
+    let names: Vec<Option<&str>> = slow.run.jobs.iter().map(|j| j.name.as_deref()).collect();
+    assert_eq!(
+        names,
+        vec![Some("a"), Some("b"), Some("c")],
+        "replaced whole: the top level's job is not among them"
+    );
+    for j in &slow.run.jobs {
+        assert_eq!(
+            j.cmd, "make check",
+            "though every other key still falls back to the run"
+        );
+    }
+}
+
+/// Two jobs cannot share a name, and the reason is worth keeping next to the
+/// test: the name is the session's and the results directory's, so a duplicate
+/// is two machines writing one directory with the second entry losing
+/// everywhere downstream. uniqueItems cannot see it once the bodies differ.
+#[test]
+fn two_jobs_cannot_share_a_name() {
+    let e = from_str(
+        r#"
+schema = 1
+project = "collide"
+guests = ["g"]
+exec = "host"
+
+[run]
+cmd = "make check"
+
+[[run.jobs]]
+name = "slow"
+cmd = "make slow"
+
+[[run.jobs]]
+name = "slow"
+cmd = "make slower"
+"#,
+        "<inline>",
+    )
+    .expect_err("must be refused");
+
+    let text = e.to_string();
+    assert!(
+        text.contains("more than once"),
+        "the complaint must name the problem: {text}"
+    );
+    assert!(
+        text.contains("slow"),
+        "and the job it is about: {text}"
     );
 }
 
@@ -332,7 +546,7 @@ image = "docker.io/library/driver@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 cmd = "make check"
 "#;
     let m = from_str(text, "<inline>").expect("valid");
-    assert!(m.guests[0].run.image.as_deref().unwrap().contains("driver"));
+    assert!(sole_job(&m.guests[0]).image.as_deref().unwrap().contains("driver"));
 }
 
 /// Sync exclusions are read and handed on uninterpreted. The framework does not
@@ -414,7 +628,7 @@ run = { exec = "host", cmd = "make check" }
     let g = &m.guests[0];
     assert_eq!(g.exec, None, "no default was stated, and none is invented");
     assert_eq!(g.build.as_ref().unwrap().exec, Exec::Host);
-    assert_eq!(g.run.exec, Exec::Host);
+    assert_eq!(sole_job(g).exec, Exec::Host);
 }
 
 /// Load from a string by way of a scratch file, for shapes small enough that

@@ -96,21 +96,41 @@ pub struct Build {
     pub env: BTreeMap<String, String>,
 }
 
+/// One job of a run: a command, and everything needed to execute it.
+///
+/// This is the shape the resolved `run` of a jobless manifest has always had,
+/// kept deliberately: resolution gives such a manifest exactly one unnamed job,
+/// so every consumer iterates jobs and there is no second code path for the
+/// single-job case to drift away from.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Run {
+pub struct Job {
+    /// `None` on the implicit job of a manifest that declares none -- which is
+    /// how that manifest keeps the session name and the results directory it
+    /// has always had. `Some` names both.
+    #[serde(default)]
+    pub name: Option<String>,
     /// As [`Build::exec`].
     pub exec: Exec,
-    /// Under container execution, `build.image` unless this verb named its own.
+    /// Under container execution: this job's own image, else the run's, else
+    /// `build.image`. Never inherited under host execution, which has nowhere
+    /// to run one.
     #[serde(default)]
     pub image: Option<String>,
     /// Opaque. This crate does not know what a stage, a journey or a seed is.
     pub cmd: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Run {
     /// May be empty: a project that runs no containers declares no images.
     #[serde(default)]
     pub images: Vec<String>,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
+    /// Never empty. A manifest declaring no jobs resolves to one.
+    pub jobs: Vec<Job>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -172,6 +192,21 @@ impl Manifest {
     /// The guest with this name, if the manifest declares it.
     pub fn guest(&self, name: &str) -> Option<&Guest> {
         self.guests.iter().find(|g| g.name == name)
+    }
+}
+
+impl Guest {
+    /// This guest's job of that name, where `None` asks for the implicit one.
+    ///
+    /// Asked rather than indexed: a session records the job it was made for,
+    /// and between that record being written and this being read the manifest
+    /// may have been edited. Position would silently hand over a different
+    /// job's command; a name hands over nothing.
+    pub fn job(&self, name: Option<&str>) -> Option<&Job> {
+        self.run
+            .jobs
+            .iter()
+            .find(|j| j.name.as_deref() == name)
     }
 }
 
@@ -388,17 +423,93 @@ fn resolve_guests(doc: &Value) -> Result<Vec<Value>, String> {
             }
         }
 
-        // A container-execution `run` with no image of its own runs in the
-        // toolchain the build declared, so a project whose two verbs share one
-        // image writes the digest once. Deliberately never for a
-        // host-execution run: it has nowhere to run an image, and inheriting
-        // one would earn a rejection for a key the tenant never wrote.
-        if let (Some(Value::Object(r)), Some(Value::Object(b))) = (&mut run, &build) {
-            if r.get("exec") == Some(&json!("container")) && !r.contains_key("image") {
-                if let Some(image) = b.get("image") {
-                    r.insert("image".into(), image.clone());
+        // Every run is a list of jobs, and a run that declares none is a list
+        // of one. Expanding here rather than at each consumer is the whole
+        // reason the single-job case cannot drift: `up`, the verbs and `down`
+        // all iterate jobs, and a manifest written before jobs existed
+        // resolves to exactly what it always did -- one job, carrying no name,
+        // which is what keeps its session name and its results directory.
+        if let Some(Value::Object(r)) = &mut run {
+            let overrides: Vec<Value> = match r.remove("jobs") {
+                Some(Value::Array(a)) => a,
+                // The implicit job overrides nothing, so it *is* the run.
+                None => vec![Value::Object(Map::new())],
+                Some(_) => {
+                    return Err(
+                        "run.jobs is not an array; the root schema should have caught this".into(),
+                    )
                 }
+            };
+
+            let build_image = build.as_ref().and_then(|b| b.get("image")).cloned();
+            let mut jobs = Vec::with_capacity(overrides.len());
+            let mut named: Vec<String> = Vec::new();
+
+            for over in &overrides {
+                let o = over.as_object().ok_or_else(|| {
+                    "a run.jobs entry is not a table; the root schema should have caught this"
+                        .to_string()
+                })?;
+
+                let mut job = Map::new();
+                if let Some(n) = o.get("name") {
+                    let name = n
+                        .as_str()
+                        .ok_or_else(|| "a job name is not a string".to_string())?;
+                    // A job's name is its session's name and its results
+                    // directory's name. Two jobs sharing one would be two
+                    // machines writing one directory, and the second entry
+                    // would lose everywhere downstream -- the same failure
+                    // duplicate guest names have, and invisible to
+                    // uniqueItems the moment the two entries differ in
+                    // anything else.
+                    if named.iter().any(|seen| seen == name) {
+                        return Err(format!(
+                            "run.jobs declares {name:?} more than once; a job gets one entry, and its name is its session"
+                        ));
+                    }
+                    named.push(name.to_string());
+                    job.insert("name".into(), n.clone());
+                }
+
+                // Key by key from the job, falling back to the run -- exactly
+                // as a guest's overrides fall back to the top level, `env`
+                // included, which means replaced whole rather than merged
+                // into. A shard that restates one variable gets one variable.
+                for key in ["exec", "cmd", "env"] {
+                    if let Some(v) = o.get(key).or_else(|| r.get(key)) {
+                        job.insert(key.into(), v.clone());
+                    }
+                }
+
+                // A container-execution job with no image of its own runs in
+                // the toolchain the build declared, so a project whose verbs
+                // share one image writes the digest once. Deliberately never
+                // under host execution: it has nowhere to run an image, and
+                // inheriting one would earn a rejection for a key the tenant
+                // never wrote. A declared image is kept whatever the mode, so
+                // that an incoherent pair is refused by the schema rather than
+                // half-discarded here.
+                let declared = o.get("image").or_else(|| r.get("image")).cloned();
+                let image = match declared {
+                    Some(i) => Some(i),
+                    None if job.get("exec") == Some(&json!("container")) => build_image.clone(),
+                    None => None,
+                };
+                if let Some(i) = image {
+                    job.insert("image".into(), i);
+                }
+
+                jobs.push(Value::Object(job));
             }
+
+            // What the jobs were built out of is no longer the run's business.
+            // Leaving `cmd` behind would leave a consumer a key to read
+            // instead of the job's, and the two can say different things.
+            for key in ["exec", "cmd", "env", "image"] {
+                r.remove(key);
+            }
+            r.insert("jobs".into(), Value::Array(jobs));
         }
 
         // Cache names become REAPER_CACHE_<NAME> with [a-z.-] mangled to

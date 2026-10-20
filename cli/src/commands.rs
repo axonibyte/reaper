@@ -55,12 +55,41 @@ fn load_manifest(explicit: Option<PathBuf>) -> Result<Manifest> {
 /// One session per guest. The name is the project alone when there is only one,
 /// because `my-project` reads better than `my-project-some-guest` and most
 /// projects have exactly one.
-fn session_name(project: &str, guest: &str, single: bool) -> String {
-    if single {
+fn session_name(project: &str, guest: &str, job: Option<&str>, single: bool) -> String {
+    let mut name = if single {
         project.to_string()
     } else {
         format!("{project}-{guest}")
+    };
+    // Only a named job lengthens the name, so a manifest written before jobs
+    // existed keeps the session names it has always had -- which matters more
+    // than tidiness: a name that changed would orphan every machine already
+    // running under the old one.
+    if let Some(j) = job {
+        name.push('-');
+        name.push_str(j);
     }
+    name
+}
+
+/// Where this session's results land under `out/`, if not at its top.
+///
+/// A session running a named job gets a directory of its own, because its
+/// siblings are other machines running the same suite and writing the same
+/// file names: four shards all producing `results.xml` into one directory is
+/// three shards' results lost, and nothing would look wrong. The directory is
+/// what distinguishes the session from those siblings -- its name with the
+/// project stripped off -- so `out/shard-3/` under one guest and
+/// `out/some-bsd-shard-3/` under two.
+///
+/// A session with no job keeps `out/` itself, whatever else the manifest says.
+/// Multi-guest manifests have always collected into one directory, and
+/// changing that would be a change to what existing projects find after a
+/// run rather than part of making jobs work.
+fn results_subdir(s: &Session) -> Option<&str> {
+    s.job.as_deref()?;
+    let prefix = format!("{}-", s.project);
+    s.name.strip_prefix(&prefix)
 }
 
 fn ttl_for(cfg: &Config, manifest: &Manifest, profile: Option<&str>, override_: Option<&str>) -> Result<Duration> {
@@ -131,8 +160,54 @@ pub fn up(
     let single = manifest.guests.len() == 1;
     let provider = provider_for(&cfg)?;
 
-    for g in wanted {
-        let name = session_name(&manifest.project, &g.name, single);
+    // Every session this `up` has been asked for, named before any of them is
+    // created. A guest's run is a list of jobs -- one, for a manifest that
+    // declares none -- and each job gets a machine of its own, because that is
+    // what makes two of them finish in the time one used to take.
+    let project = manifest.project.as_str();
+    let planned: Vec<(&reaper_manifest::Guest, &reaper_manifest::Job, String)> = wanted
+        .iter()
+        .flat_map(|g| {
+            let g: &reaper_manifest::Guest = g;
+            g.run.jobs.iter().map(move |j| {
+                let name = session_name(project, &g.name, j.name.as_deref(), single);
+                (g, j, name)
+            })
+        })
+        .collect();
+
+    // Two sessions cannot share a name, and two names can meet by accident the
+    // moment a job's name is part of one: guest "a" with job "b" and guest
+    // "a-b" with no job both spell {project}-a-b. The second would then find
+    // the first's record, decide it was looking at its own machine, and push a
+    // tree across the boundary. Refused here, before either exists, because
+    // afterwards one of them is a running machine nothing can address.
+    for (i, (g, j, name)) in planned.iter().enumerate() {
+        if let Some((og, oj, _)) = planned[..i].iter().find(|(_, _, n)| n == name) {
+            let describe = |g: &reaper_manifest::Guest, j: &reaper_manifest::Job| match &j.name {
+                Some(n) => format!("guest {:?} job {n:?}", g.name),
+                None => format!("guest {:?}", g.name),
+            };
+            return Err(format!(
+                "{} and {} would both be session {name:?}, and a session name has to \
+                 name one machine. Rename the job, or the guest entry",
+                describe(og, oj),
+                describe(g, j)
+            )
+            .into());
+        }
+    }
+
+    // The concurrency cap is NOT asked here, deliberately. Asking once up
+    // front would refuse a request the cap cannot fit before creating any of
+    // it, which reads like the better failure -- but `up` is resumable and
+    // this project decided the other way: the half that fits is created, stays
+    // visible, and a later `up` finishes the rest once something is taken
+    // down. Jobs do not change that; what they change is the cost of a
+    // half-finished set, and that is answered where it actually bites, in the
+    // verbs -- a run of three shards out of four must not report a green
+    // suite. See `every_job_has_a_session`.
+    for (g, job, name) in planned {
 
         if let Some(existing) = store.get(&name)? {
             // Whose record is this? Session names are {project}-{guest} (or
@@ -252,6 +327,7 @@ pub fn up(
             name: name.clone(),
             project: manifest.project.clone(),
             guest: g.name.clone(),
+            job: job.name.clone(),
             template,
             machine: machine.clone(),
             address: None,
@@ -272,7 +348,7 @@ pub fn up(
                 // it has no pool. Firstboot is what makes it a session, so it
                 // happens before the session is called ready.
                 prepare(&name, &ssh)?;
-                prepull(&ssh, &name, &declared_images(g));
+                prepull(&ssh, &name, &declared_images(g, job));
                 if !manifest.reset.is_empty() {
                     start_control(&ssh, &manifest.project)?;
                 }
@@ -861,6 +937,57 @@ fn project_of(manifest_path: Option<PathBuf>) -> Result<Option<String>> {
     }
 }
 
+/// Refuse a verb that would act on some of a guest's jobs but not all of them.
+///
+/// `up` is resumable and creates the half of a request the concurrency cap can
+/// fit, which is a deliberate decision and a good one -- a machine already
+/// cloned should not be thrown away because its sibling did not fit. What jobs
+/// add is a cost to stopping there: three shards of a four-shard suite run,
+/// every one of them passes, `out/` fills with green result files, and the
+/// exit status agrees. Nothing in that picture says a quarter of the suite
+/// never executed. That is the same failure `clear_results` exists to prevent,
+/// one level up, and it is the one shape a result can have that nobody
+/// catches.
+///
+/// Only a guest that is already up is held to this. A guest with no session at
+/// all was left out on purpose: `up --guest` exists precisely so one platform
+/// can be brought up alone, and a manifest declaring no jobs has exactly one
+/// per guest, so this can never fire on a manifest written before jobs
+/// existed.
+fn every_job_has_a_session(manifest: &Manifest, sessions: &[Session]) -> Result<()> {
+    let mut missing: Vec<String> = Vec::new();
+    for g in &manifest.guests {
+        if !sessions.iter().any(|s| s.guest == g.name) {
+            continue;
+        }
+        for j in &g.run.jobs {
+            if !sessions
+                .iter()
+                .any(|s| s.guest == g.name && s.job == j.name)
+            {
+                missing.push(match &j.name {
+                    Some(n) => format!("{} job {n:?}", g.name),
+                    None => g.name.clone(),
+                });
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} declared job(s) have no session: {}. Running the rest would leave {}/ \
+         holding a green result for work that never executed, with an exit status \
+         agreeing. `reaper up` makes the missing sessions; naming one session runs \
+         just that one",
+        missing.len(),
+        missing.join(", "),
+        sync::RESULTS
+    )
+    .into())
+}
+
 fn implied_sessions(
     store: &Store,
     explicit: Option<String>,
@@ -1082,13 +1209,16 @@ pub fn down(session: Option<String>, all: bool, manifest_path: Option<PathBuf>) 
 /// Pre-pulling covers the toolchain as well as the tenant's own stack: both are
 /// declared, both are needed, and a digest already in the store costs nothing
 /// to ask for again.
-fn declared_images(g: &reaper_manifest::Guest) -> Vec<String> {
+fn declared_images(g: &reaper_manifest::Guest, job: &reaper_manifest::Job) -> Vec<String> {
+    // This session's job, and not its siblings'. Each job has a machine of its
+    // own, and pre-pulling a toolchain only another shard runs would spend
+    // minutes of this one's clone on an image it never starts.
     let mut all: Vec<String> = g
         .build
         .as_ref()
         .and_then(|b| b.image.clone())
         .into_iter()
-        .chain(g.run.image.clone())
+        .chain(job.image.clone())
         .chain(g.run.images.iter().cloned())
         .collect();
     all.sort();
@@ -1142,14 +1272,23 @@ fn tree_for(s: &Session, manifest_path: Option<&Path>) -> Option<PathBuf> {
 }
 
 /// One reverse-sync, built ready to run repeatedly.
+///
+/// Where it lands is the session's business rather than the tree's: a session
+/// running a named job collects into a directory of its own, so that its
+/// siblings -- other machines running the same suite, writing the same file
+/// names -- do not overwrite each other. See [`results_subdir`].
 fn results_plan(
     cfg: &Config,
     ssh: &Ssh,
     rsh: &Path,
+    s: &Session,
     remote_results: &str,
     tree: &Path,
 ) -> Result<sync::Plan> {
-    let local = tree.join(sync::RESULTS);
+    let mut local = tree.join(sync::RESULTS);
+    if let Some(d) = results_subdir(s) {
+        local.push(d);
+    }
     std::fs::create_dir_all(&local)?;
     Ok(sync::pull(
         &cfg.session.rsync_command,
@@ -1204,7 +1343,7 @@ pub fn sync(session: Option<String>, manifest_path: Option<PathBuf>) -> Result<(
 
             // And straight back, so a session that already holds results hands
             // them over on the first sync rather than waiting for a run.
-            results_plan(&cfg, &ssh, &rsh, &results, &tree)?.run()?;
+            results_plan(&cfg, &ssh, &rsh, &s, &results, &tree)?.run()?;
             say!("{}: synced", s.name);
             Ok(())
         };
@@ -1303,7 +1442,10 @@ pub fn test(
     // `sync` asks the same question a moment later and would refuse just as
     // clearly -- but by then the results directory has been emptied, and a
     // loop that could not start must not cost the last one its output.
-    implied_sessions(&Store::open(), session.clone(), Some(&manifest.project))?;
+    let sessions = implied_sessions(&Store::open(), session.clone(), Some(&manifest.project))?;
+    if session.is_none() {
+        every_job_has_a_session(&manifest, &sessions)?;
+    }
 
     // Before anything else, and only here. `test` is the whole loop, so this
     // is exactly once per run -- whereas clearing inside `build` or `run`
@@ -1556,8 +1698,16 @@ pub fn exec(
         .into());
     }
 
+    let named = session.is_some();
+    let sessions = implied_sessions(&store, session, Some(&manifest.project))?;
+    // Not when a session was named: asking for one session is asking for one
+    // session, and that is how a shard is re-run on its own after a failure.
+    if !named {
+        every_job_has_a_session(&manifest, &sessions)?;
+    }
+
     let mut failures = 0;
-    for s in implied_sessions(&store, session, Some(&manifest.project))? {
+    for s in sessions {
         // Renewed only while THIS session's work runs, and stopped when it
         // returns. Nothing renews between commands.
         let _renewing = Renewing::during(&cfg, &s.name);
@@ -1580,6 +1730,25 @@ pub fn exec(
                 s.guest
             )
         })?;
+        // By the name the session recorded, never by position. A manifest
+        // edited between `up` and here would otherwise hand this machine a
+        // different job's command, and nothing about the run would look wrong
+        // -- the results would simply be the wrong shard's, under this one's
+        // name.
+        let job = g.job(s.job.as_deref()).ok_or_else(|| match &s.job {
+            Some(j) => format!(
+                "this session runs job {j:?} of {:?}, and the manifest no longer declares \
+                 it. Take the session down, or put the job back",
+                g.name
+            ),
+            None => format!(
+                "this session was created before {:?} declared any jobs, and it now \
+                 declares some, so there is no command here that belongs to it. \
+                 `reaper down {}` clears it, and the next `reaper up` makes one session \
+                 per job",
+                g.name, s.name
+            ),
+        })?;
 
         let (cmd, verb_env, image, mode) = match which {
             Verb::Build => match g.build.as_ref() {
@@ -1596,7 +1765,7 @@ pub fn exec(
                     continue;
                 }
             },
-            Verb::Run => (&g.run.cmd, &g.run.env, g.run.image.as_ref(), g.run.exec),
+            Verb::Run => (&job.cmd, &job.env, job.image.as_ref(), job.exec),
         };
 
         // The schema guarantees these agree, having checked the resolved form.
@@ -1651,7 +1820,7 @@ pub fn exec(
         }
 
         let rsh = sync::rsh_wrapper(&ssh, &state_file(&s.name, "rsh")?)?;
-        let plan = results_plan(&cfg, &ssh, &rsh, &results, &tree)?;
+        let plan = results_plan(&cfg, &ssh, &rsh, &s, &results, &tree)?;
 
         say!(
             "{}: {} on {}{}",
@@ -1765,7 +1934,7 @@ fn collect_last_results(cfg: &Config, s: &Session, manifest_path: Option<&Path>)
         deliver_runner(&ssh)?;
         let (_, results) = workspace(&ssh, &s.project)?;
         let rsh = sync::rsh_wrapper(&ssh, &state_file(&s.name, "rsh")?)?;
-        results_plan(cfg, &ssh, &rsh, &results, &tree)?.run()?;
+        results_plan(cfg, &ssh, &rsh, s, &results, &tree)?.run()?;
         Ok(())
     };
 

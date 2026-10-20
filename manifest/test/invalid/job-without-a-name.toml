@@ -1,0 +1,14 @@
+# A job has to be named. The name is how a session is found again on the next
+# command, so an anonymous job could be started and never addressed; and the
+# unnamed job is already spoken for -- it is what a run with no jobs resolves to.
+
+schema = 1
+project = "anonymous"
+guests = ["some-guest"]
+exec = "host"
+
+[run]
+cmd = "make check"
+
+[[run.jobs]]
+cmd = "make slow"

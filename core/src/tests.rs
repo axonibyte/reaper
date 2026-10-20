@@ -276,6 +276,7 @@ fn session(name: &str, machine: &str) -> Session {
         name: name.to_string(),
         project: "a-project".to_string(),
         guest: "a-guest".to_string(),
+        job: None,
         template: "opaque".to_string(),
         machine: MachineRef::new(machine),
         address: Some("192.0.2.10".parse().unwrap()),

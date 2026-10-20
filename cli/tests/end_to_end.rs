@@ -55,7 +55,23 @@ printf '%s
 ' "$*" >> "${here}/ssh.log"
 for a in "$@"; do
     case "${a}" in
-        *"cat > '/tmp/reaper-job.sh'"*) cat > "${here}/job" ;;
+        *"cat > '/tmp/reaper-job.sh'"*)
+            # Per session as well as to one file. One job per session means
+            # several uploads in a single verb, and a single capture file holds
+            # only whichever of them finished last -- which is how a test
+            # asserting "the slow job ran its own command" passes while the
+            # fast job runs the wrong one.
+            sess=''
+            for b in "$@"; do
+                case "${b}" in
+                    UserKnownHostsFile=*known-hosts-*) sess=${b##*known-hosts-} ;;
+                esac
+            done
+            if [ -n "${sess}" ]; then
+                tee "${here}/job.${sess}" > "${here}/job"
+            else
+                cat > "${here}/job"
+            fi ;;
         *"cat > "*) cat > "${here}/uploaded" ;;
         # The one runner reply the CLI reads rather than ignores: where the
         # workspace is. Answered here so the CLI's own use of it is exercised.
@@ -1259,6 +1275,31 @@ fn a_named_point_that_does_not_exist_is_an_error_not_a_skip() {
 impl Harness {
     /// Register a second guest at the site and hand back nothing: the point
     /// is that the config and the hypervisor both know it.
+    /// Room for this many sessions on the provider.
+    ///
+    /// A manifest that shards is a manifest that wants several machines, and
+    /// the harness default of two is deliberately tight so that the cap is
+    /// exercised -- so a test about jobs has to say how much room it means.
+    fn set_cap(&self, n: usize) {
+        let cfg = std::fs::read_to_string(self.dir.join("config.toml")).unwrap();
+        let replaced = cfg
+            .lines()
+            .map(|l| {
+                if l.trim_start().starts_with("max_concurrent") {
+                    format!("max_concurrent = {n}")
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            replaced.contains(&format!("max_concurrent = {n}")),
+            "the harness config has no max_concurrent to replace"
+        );
+        std::fs::write(self.dir.join("config.toml"), replaced + "\n").unwrap();
+    }
+
     fn add_guest(&self, name: &str) {
         let template = self.hypervisor.add_template(POOL);
         let mut cfg = std::fs::read_to_string(self.dir.join("config.toml")).unwrap();
@@ -2893,5 +2934,282 @@ fn a_listing_whose_reader_goes_away_ends_quietly() {
         done.status.success(),
         "expected a quiet exit, got {:?}: {err}",
         done.status
+    );
+}
+
+// --- jobs ------------------------------------------------------------------
+//
+// A guest's run is a list of jobs, and each job gets a machine of its own. The
+// axis exists because a tenant whose suite outgrew one run was writing a
+// manifest per piece -- which is a project per piece, and so several copies of
+// everything the pieces share.
+
+const JOBS: &str = r#"
+schema = 1
+project = "a-project"
+guests = ["a-guest"]
+exec = "host"
+
+[run]
+cmd = "make check"
+
+[[run.jobs]]
+name = "fast"
+
+[[run.jobs]]
+name = "slow"
+cmd = "make slow"
+"#;
+
+#[test]
+fn each_job_gets_a_session_of_its_own_running_its_own_command() {
+    let h = Harness::new("jobs");
+    h.set_cap(4);
+    write(&h.dir.join(".reaper.toml"), JOBS, None);
+
+    let up = h.ok(&["up"]);
+    assert!(up.contains("a-project-fast"), "{up}");
+    assert!(up.contains("a-project-slow"), "{up}");
+    assert_eq!(h.machines().len(), 2, "a machine each: {:?}", h.machines());
+
+    h.ok(&["sync"]);
+    let run = h.ok(&["run"]);
+    assert!(run.contains("a-project-fast: run finished"), "{run}");
+    assert!(run.contains("a-project-slow: run finished"), "{run}");
+
+    // The command each machine was actually handed. Asserted per session
+    // rather than from one capture file, because the whole claim is that the
+    // two differ: `slow` names its own command and `fast` inherits the run's.
+    let fast = h.log("job.a-project-fast");
+    let slow = h.log("job.a-project-slow");
+    assert!(
+        fast.contains("make check") && !fast.contains("make slow"),
+        "the inheriting job runs the run's command: {fast}"
+    );
+    assert!(
+        slow.contains("make slow"),
+        "the overriding job runs its own: {slow}"
+    );
+
+    h.ok(&["down"]);
+}
+
+#[test]
+fn each_jobs_results_come_back_in_a_directory_of_its_own() {
+    // Four shards of one suite all write `results.xml`. Collected into one
+    // directory that is three shards' results lost, with nothing to show that
+    // anything went missing -- so a session that runs a named job owns a
+    // directory under out/ rather than the top of it.
+    let h = Harness::new("jobsout");
+    h.set_cap(4);
+    write(&h.dir.join(".reaper.toml"), JOBS, None);
+    h.ok(&["up"]);
+    h.ok(&["sync"]);
+
+    let rsync = h.log("rsync.log");
+    assert!(
+        rsync.contains("/out/fast/"),
+        "the fast job pulls into its own directory: {rsync}"
+    );
+    assert!(
+        rsync.contains("/out/slow/"),
+        "and so does the slow one: {rsync}"
+    );
+    assert!(
+        h.dir.join("out/fast").is_dir() && h.dir.join("out/slow").is_dir(),
+        "and the directories are made before the first pull, or the pull fails \
+         on a destination that was never created"
+    );
+
+    h.ok(&["down"]);
+}
+
+#[test]
+fn a_manifest_declaring_no_jobs_keeps_its_session_name_and_its_out_directory() {
+    // The backwards-compatibility claim, stated as its own arm rather than
+    // left as an inference from the arms that happen to use the default
+    // manifest. A session name that changed would orphan every machine
+    // already running under the old one, and a results directory that moved
+    // would break whatever globs it.
+    let h = Harness::new("nojobs");
+    h.ok(&["up"]);
+
+    let list = h.ok(&["list"]);
+    assert!(list.contains("a-project"), "{list}");
+    assert!(
+        !list.contains("a-project-"),
+        "no job, so nothing is appended to the name: {list}"
+    );
+
+    h.ok(&["sync"]);
+    let rsync = h.log("rsync.log");
+    let dest = rsync
+        .lines()
+        .find(|l| l.contains(":/a-pool/work/a-project/out/"))
+        .unwrap_or_else(|| panic!("no results pull in {rsync}"));
+    assert!(
+        dest.trim_end().ends_with("/out/"),
+        "results land at the top of out/, exactly where they always have: {dest}"
+    );
+
+    h.ok(&["down"]);
+}
+
+#[test]
+fn a_run_refuses_while_a_job_has_no_session() {
+    // `up` creates the half of a request the cap can fit and keeps it, which
+    // is deliberate. What must not follow is a run of two shards out of three
+    // that fills out/ with green results and exits 0: nothing in that picture
+    // says a third of the suite never executed.
+    let h = Harness::new("jobsshort");
+    h.set_cap(1);
+    write(&h.dir.join(".reaper.toml"), JOBS, None);
+
+    let err = h.fails(&["up"]);
+    assert!(err.contains("max_concurrent"), "{err}");
+    let list = h.ok(&["list"]);
+    assert!(list.contains("a-project-fast"), "the half that fits: {list}");
+
+    h.ok(&["sync"]);
+    let err = h.fails(&["run"]);
+    assert!(
+        err.contains("slow"),
+        "name the job that is missing a session: {err}"
+    );
+    assert!(
+        err.contains("never executed"),
+        "and say why running the rest is worse than refusing: {err}"
+    );
+
+    // Naming one session still runs just that one: it is how a shard is
+    // re-run on its own after a failure, and the refusal above must not take
+    // that away.
+    let run = h.ok(&["run", "a-project-fast"]);
+    assert!(run.contains("a-project-fast: run finished"), "{run}");
+
+    h.ok(&["down"]);
+}
+
+#[test]
+fn a_session_whose_job_the_manifest_dropped_says_so() {
+    // The session records the job by name, and this is the arm that proves it
+    // is read by name rather than by position. Dropping `fast` from the
+    // manifest leaves `slow` first in the list -- so a verb indexing into it
+    // would hand the slow session the fast job's command, run the wrong shard
+    // under the right name, and report success.
+    let h = Harness::new("jobsdropped");
+    h.set_cap(4);
+    write(&h.dir.join(".reaper.toml"), JOBS, None);
+    h.ok(&["up"]);
+    h.ok(&["sync"]);
+
+    write(
+        &h.dir.join(".reaper.toml"),
+        r#"
+schema = 1
+project = "a-project"
+guests = ["a-guest"]
+exec = "host"
+
+[run]
+cmd = "make check"
+
+[[run.jobs]]
+name = "slow"
+cmd = "make slow"
+"#,
+        None,
+    );
+
+    let err = h.fails(&["run"]);
+    assert!(
+        err.contains("fast"),
+        "name the job the manifest no longer declares: {err}"
+    );
+    assert!(
+        err.contains("no longer declares it"),
+        "and say that is what happened, rather than failing deeper: {err}"
+    );
+
+    h.ok(&["down"]);
+}
+
+#[test]
+fn two_guests_and_two_jobs_name_both_in_the_session() {
+    // A job name alone would collide across guests: the same shard of the same
+    // suite on two platforms is two machines. The session name carries both.
+    let h = Harness::new("jobsguests");
+    h.set_cap(8);
+    h.add_guest("b-guest");
+    write(
+        &h.dir.join(".reaper.toml"),
+        r#"
+schema = 1
+project = "a-project"
+guests = ["a-guest", "b-guest"]
+exec = "host"
+
+[run]
+cmd = "make check"
+
+[[run.jobs]]
+name = "fast"
+
+[[run.jobs]]
+name = "slow"
+"#,
+        None,
+    );
+
+    h.ok(&["up"]);
+    let list = h.ok(&["list"]);
+    for name in [
+        "a-project-a-guest-fast",
+        "a-project-a-guest-slow",
+        "a-project-b-guest-fast",
+        "a-project-b-guest-slow",
+    ] {
+        assert!(list.contains(name), "missing {name}: {list}");
+    }
+    assert_eq!(h.machines().len(), 4, "{:?}", h.machines());
+
+    h.ok(&["down"]);
+}
+
+#[test]
+fn a_job_name_that_would_collide_with_a_guest_name_is_refused_before_anything_is_made() {
+    // Guest "a-guest" with job "b" and a guest literally named "a-guest-b"
+    // both spell a-project-a-guest-b. The second would find the first's
+    // record, take it for its own machine, and push a tree across the
+    // boundary -- so the pair is refused while both are still only words.
+    let h = Harness::new("jobscollide");
+    h.set_cap(8);
+    h.add_guest("a-guest-b");
+    write(
+        &h.dir.join(".reaper.toml"),
+        r#"
+schema = 1
+project = "a-project"
+guests = [
+  "a-guest-b",
+  { name = "a-guest", run = { jobs = [ { name = "b" } ] } },
+]
+exec = "host"
+
+[run]
+cmd = "make check"
+"#,
+        None,
+    );
+
+    let err = h.fails(&["up"]);
+    assert!(
+        err.contains("a-project-a-guest-b"),
+        "name the session both would be: {err}"
+    );
+    assert!(
+        h.machines().is_empty(),
+        "and nothing may have been created: {:?}",
+        h.machines()
     );
 }

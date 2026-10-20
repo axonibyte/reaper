@@ -1,0 +1,33 @@
+# A suite split across machines: one command, four shards, each on its own
+# session, all of them at once. This is the shape that was unexpressible before
+# jobs existed -- the only way to get it was a manifest per shard, which is a
+# project per shard, which is four sets of everything the project shares.
+#
+# Each job restates only what differs. Note that `env` is replaced whole rather
+# than merged, exactly as a guest's override of `run` is, so a shard that needs
+# a variable from the run states it again.
+
+schema = 1
+project = "sharded"
+guests = ["some-guest"]
+exec = "host"
+
+[run]
+cmd = "make check"
+env = { CI = "1" }
+
+[[run.jobs]]
+name = "shard-1"
+env = { CI = "1", SHARD = "1" }
+
+[[run.jobs]]
+name = "shard-2"
+env = { CI = "1", SHARD = "2" }
+
+[[run.jobs]]
+name = "shard-3"
+env = { CI = "1", SHARD = "3" }
+
+[[run.jobs]]
+name = "shard-4"
+env = { CI = "1", SHARD = "4" }

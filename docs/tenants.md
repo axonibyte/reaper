@@ -131,6 +131,85 @@ each key is replaced whole, and `env` is one key -- override one variable and
 every top-level variable the guest did not restate is gone, not merged under
 yours. Restate the whole `env` you mean.
 
+## Splitting a run across machines
+
+A suite that has outgrown one run does not have to be split across manifests.
+Declare **jobs** under `run`, and each one gets a session of its own:
+
+```toml
+[run]
+cmd = "make check"
+env = { CI = "1" }
+
+[[run.jobs]]
+name = "shard-1"
+env = { CI = "1", SHARD = "1" }
+
+[[run.jobs]]
+name = "shard-2"
+env = { CI = "1", SHARD = "2" }
+```
+
+That is two machines, each running `make check` with a different `SHARD`, and
+each collecting into `out/shard-1/` and `out/shard-2/`. Every verb acts on both,
+exactly as it acts on every guest.
+
+A job inherits every key of `run` it does not restate -- `cmd`, `exec`, `image`,
+`env` -- so jobs that differ only in their environment say only that. Jobs that
+differ in more may say more:
+
+```toml
+[[run.jobs]]
+name = "unit"            # inherits the command, and the build's toolchain
+
+[[run.jobs]]
+name = "integration"
+cmd = "make integration"
+image = "registry.example/driver@sha256:..."
+
+[[run.jobs]]
+name = "e2e"
+exec = "host"            # drives containers of its own
+cmd = "e2e/run.sh"
+```
+
+Mind the same rule overriding `env` here that applies to a guest overriding
+`run`: **it is replaced whole, not merged.** A shard that needs a variable the
+run declares states it again. That is why `CI` appears in all three places
+above.
+
+Jobs compose with guests rather than competing with them. A guest is a
+*platform* -- it comes from the sysadmin's registry and decides which template
+is cloned. A job is a *piece of the work*. Two guests and three jobs is six
+sessions, named `{project}-{guest}-{job}`; one guest and three jobs is three,
+named `{project}-{job}`. A manifest declaring no jobs keeps the session names
+and the `out/` layout it has always had.
+
+### How many run at once
+
+As many as the site allows. The figure is `session.max_concurrent` in the
+sysadmin's configuration (see [`site-config.md`](site-config.md)), it counts
+sessions across the whole provider rather than yours alone, and a manifest
+cannot raise it -- the identifiers and the storage being rationed are the
+cluster's, not the project's.
+
+Which means a manifest can ask for more sessions than there is room for. `up`
+creates as many as fit, keeps them, and says what it could not create; a later
+`up` finishes the rest once something has been taken down. What it will not do
+is let you run half a suite and call it a pass: a verb acting on a guest some of
+whose jobs have no session **refuses**, because the alternative is an `out/`
+full of green results for shards that never executed and an exit status that
+agrees with them. Name a single session to run just that one -- which is how a
+shard is re-run on its own after it fails.
+
+### What a job name has to survive
+
+It becomes a session name and a directory name, so it is held to the same
+spelling as every other name in the manifest: lowercase, starting
+alphanumeric. Two jobs of one guest may not share a name, and a job's name may
+not collide with another guest's -- `up` refuses the pair while both are still
+only words rather than after one is a running machine.
+
 ## Container execution or host execution
 
 `exec` must be stated -- at the top level, per guest, or per verb; a manifest
@@ -271,6 +350,12 @@ anchors one at the top of your tree.
 Backward, it is `out/` and only `out/`, and it **never deletes**. The session is
 authoritative for what it produced; it is not authoritative for what was in your
 `out/` beforehand.
+
+A session running a named job collects into `out/<job>/` instead of the top of
+`out/` -- `out/some-bsd-shard-3/` where several guests are in play, matching the
+session's own name. Its siblings are other machines running the same suite and
+writing the same file names, and one directory for all of them is every shard
+but one lost with nothing to show that anything went missing.
 
 `out/` is excluded from the forward direction whatever else you write, because
 mirroring deletions into the directory results arrive in would destroy them.

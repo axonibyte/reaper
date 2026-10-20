@@ -1,0 +1,21 @@
+# One job overriding execution mode to host while naming a toolchain image.
+# The coherence rules that used to be asked of a resolved `run` are now asked
+# of every resolved job, and this is the fixture that proves they still fire
+# when the incoherent pair is one job deep.
+
+schema = 1
+project = "job-modes"
+guests = ["some-guest"]
+exec = "container"
+
+[build]
+image = "docker.io/library/builder@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cmd = "make"
+
+[run]
+cmd = "make check"
+
+[[run.jobs]]
+name = "e2e"
+exec = "host"
+image = "docker.io/library/driver@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

@@ -1,0 +1,13 @@
+# A job name ends up in a session identifier and a directory name, so it is
+# held to the same narrow spelling every other name in this file is.
+
+schema = 1
+project = "shouty"
+guests = ["some-guest"]
+exec = "host"
+
+[run]
+cmd = "make check"
+
+[[run.jobs]]
+name = "Shard-1"

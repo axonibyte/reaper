@@ -122,6 +122,21 @@ pub struct Session {
     pub name: String,
     pub project: String,
     pub guest: String,
+    /// Which job of the guest's run this session exists to run, or `None` for
+    /// a manifest that declares none.
+    ///
+    /// Recorded rather than recomputed from the manifest. Between `up` writing
+    /// this and a later verb reading it the manifest may have been edited, and
+    /// a position in a list would then hand over a different job's command
+    /// without anything looking wrong. A name hands over nothing instead.
+    ///
+    /// Additive, with no bump to `VERSION`, for the same reason `provider`
+    /// below is: a bump would make every store already on disk read as written
+    /// by a different reaper, which is a worse failure than the one it guards.
+    /// Absent means a session created before jobs existed, and that is exactly
+    /// what `None` means anyway.
+    #[serde(default)]
+    pub job: Option<String>,
     pub template: String,
     pub machine: MachineRef,
     #[serde(default)]

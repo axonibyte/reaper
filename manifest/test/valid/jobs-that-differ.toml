@@ -1,0 +1,33 @@
+# Jobs are not only shards of one command. These three differ in command, in
+# execution mode and in toolchain -- which is the other thing a tenant was
+# using a second manifest for: a slow tier that needs a different image from
+# the fast one it is holding up.
+
+schema = 1
+project = "tiers"
+guests = ["some-guest"]
+exec = "container"
+
+[build]
+image = "docker.io/library/builder@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cmd = "make"
+cache = ["obj"]
+
+[run]
+cmd = "make check"
+
+[[run.jobs]]
+# Inherits the command, and the build's toolchain with it.
+name = "unit"
+
+[[run.jobs]]
+name = "integration"
+cmd = "make integration"
+image = "docker.io/library/driver@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+[[run.jobs]]
+# Drives containers of its own, so it needs the guest's engine rather than a
+# toolchain image -- and must not inherit one it has nowhere to run.
+name = "e2e"
+exec = "host"
+cmd = "e2e/run.sh"
