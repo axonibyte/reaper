@@ -346,6 +346,11 @@ fn a_session_goes_up_gets_listed_renewed_and_comes_back_down() {
     assert!(listed.contains("a-project"), "{listed}");
     assert!(listed.contains("192.0.2.42"), "{listed}");
     assert!(listed.contains("a-guest"), "{listed}");
+    // Ready, so EXPIRES is the real TTL and carries no grace marker (issue #1).
+    assert!(
+        !listed.contains("(grace)"),
+        "a ready session is not on its grace: {listed}"
+    );
 
     // Renewing moves the tag forward, which is the whole dead-man's switch.
     std::thread::sleep(Duration::from_millis(1100));
@@ -589,7 +594,15 @@ fn a_session_whose_storage_cannot_be_built_is_not_reported_as_ready() {
     // The machine still exists and still carries its expiry, so nothing is
     // leaked -- and the session is recorded, so `down` can clear it.
     assert_eq!(h.machines().len(), 1);
-    assert!(h.ok(&["list"]).contains("a-project"));
+    let listed = h.ok(&["list"]);
+    assert!(listed.contains("a-project"));
+    // Never ready, so what EXPIRES shows is the creation grace, and the row
+    // says so where the number is (issue #1): a reader must not take it for
+    // the profile's TTL.
+    assert!(
+        listed.contains("(grace)"),
+        "a session on its grace must say so: {listed}"
+    );
 
     std::fs::remove_file(h.dir.join("ssh.fail")).unwrap();
     h.ok(&["down"]);
