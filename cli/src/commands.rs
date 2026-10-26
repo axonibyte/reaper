@@ -1351,15 +1351,33 @@ pub fn sync(session: Option<String>, manifest_path: Option<PathBuf>) -> Result<(
             let rsh = sync::rsh_wrapper(&ssh, &state_file(&s.name, "rsh")?)?;
 
             say!("{}: {} -> {}", s.name, tree.display(), ssh.describe());
-            let pushed = sync::push(
+            let (plans, worktree) = sync::push_plans(
                 &cfg.session.rsync_command,
                 &rsh,
                 &ssh,
                 &tree,
                 &work,
                 &manifest.sync_exclude,
-            )
-            .run()?;
+            )?;
+            if let Some(wt) = &worktree {
+                // Said, because the tree that lands there is not a copy of
+                // this one: it carries a repository this directory does not.
+                say!(
+                    "{}: {} is a linked working tree; shipping the repository it shares at {}",
+                    s.name,
+                    tree.display(),
+                    wt.common.display()
+                );
+            }
+            // The tree's own sync is the first plan whatever the shape, and
+            // the only one whose removals are the operator's.
+            let mut pushed = String::new();
+            for (i, plan) in plans.iter().enumerate() {
+                let out = plan.run()?;
+                if i == 0 {
+                    pushed = out;
+                }
+            }
             // Said out loud, because the alternative is inferring it. A
             // baseline taken by stashing removes files, and if that removal
             // does not reach the guest the build there compiles code the

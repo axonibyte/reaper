@@ -371,6 +371,19 @@ out of it, and after the first sync the deltas make it cheap. Anything you would
 rather not send goes in `sync.exclude`, as rsync patterns; a leading slash
 anchors one at the top of your tree.
 
+A linked working tree -- one made with `git worktree add`, which is the
+documented way to have two branches of one repository checked out side by
+side -- has no `.git` directory, only a one-line file pointing into the main
+checkout's. Shipped as it is, that pointer names a path the guest does not
+have, and every git invocation there fails with "not a git repository": an
+`ls-files`-driven lint runs on nothing, a `git status` oracle panics, and the
+battery is red for a reason nothing names. So sync recognises the pointer and
+builds a real repository on the guest instead, out of the two halves it points
+at -- the shared objects and refs, then this checkout's own HEAD and index over
+the top -- and says so. A pointer that leads nowhere, because the main checkout
+has been moved or removed, is refused before anything is sent; `git worktree
+repair` from the main checkout is the cure.
+
 Backward, it is `out/` and only `out/`, and it **never deletes**. The session is
 authoritative for what it produced; it is not authoritative for what was in your
 `out/` beforehand.

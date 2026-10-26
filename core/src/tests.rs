@@ -1203,6 +1203,320 @@ fn write(path: &Path, bytes: &[u8]) {
     std::fs::write(path, bytes).unwrap();
 }
 
+// --- linked working trees (reaper#3) ------------------------------------------
+
+/// A main checkout and a worktree of it, laid out by hand the way git lays
+/// them out, so the resolver is tested on the files and not on git's opinion
+/// of them. `relative` writes the pointer the way `git worktree add` does on
+/// some versions (relative to the tree) rather than absolute.
+fn hand_made_worktree(dir: &Path, relative: bool) -> (PathBuf, PathBuf) {
+    let main = dir.join("main");
+    let wt = dir.join("wt");
+    write(&main.join(".git/HEAD"), b"ref: refs/heads/main\n");
+    write(&main.join(".git/objects/info/.keep"), b"");
+    let private = main.join(".git/worktrees/wt");
+    write(&private.join("HEAD"), b"ref: refs/heads/topic\n");
+    write(&private.join("commondir"), b"../..\n");
+    write(
+        &private.join("gitdir"),
+        format!("{}/.git\n", wt.display()).as_bytes(),
+    );
+    let pointer = if relative {
+        "gitdir: ../main/.git/worktrees/wt\n".to_string()
+    } else {
+        format!("gitdir: {}\n", private.display())
+    };
+    write(&wt.join(".git"), pointer.as_bytes());
+    write(&wt.join("src/lib.rs"), b"");
+    (main, wt)
+}
+
+#[test]
+fn a_linked_working_tree_is_recognised_and_its_two_halves_found() {
+    let dir = scratch("worktree-resolve");
+    let (main, wt) = hand_made_worktree(&dir, false);
+
+    let found = sync::worktree(&wt)
+        .unwrap()
+        .expect("a pointer file is a worktree");
+    assert_eq!(
+        found.private,
+        std::fs::canonicalize(main.join(".git/worktrees/wt")).unwrap()
+    );
+    assert_eq!(
+        found.common,
+        std::fs::canonicalize(main.join(".git")).unwrap()
+    );
+
+    // The main checkout is an ordinary repository, and a directory with no
+    // repository at all is just a directory: both sync as they are.
+    assert_eq!(sync::worktree(&main).unwrap(), None);
+    let plain = dir.join("plain");
+    write(&plain.join("README"), b"");
+    assert_eq!(sync::worktree(&plain).unwrap(), None);
+
+    // A pointer written relative to the tree resolves against the tree.
+    let dir2 = scratch("worktree-relative");
+    let (main2, wt2) = hand_made_worktree(&dir2, true);
+    assert_eq!(
+        sync::worktree(&wt2).unwrap().unwrap().common,
+        std::fs::canonicalize(main2.join(".git")).unwrap()
+    );
+}
+
+#[test]
+fn a_pointer_that_leads_nowhere_is_refused_rather_than_shipped() {
+    // The failure that cost a battery: shipped as a file, the pointer names a
+    // path the guest does not have, and three oracles failed three different
+    // ways with nothing saying "there is no repository here".
+    let dir = scratch("worktree-dangling");
+    let (main, wt) = hand_made_worktree(&dir, false);
+    std::fs::remove_dir_all(main.join(".git/worktrees")).unwrap();
+
+    let err = sync::worktree(&wt).expect_err("a dangling pointer must not pass");
+    let text = err.to_string();
+    assert!(text.contains("moved or removed"), "{text}");
+    assert!(
+        text.contains("git worktree repair"),
+        "names the cure: {text}"
+    );
+
+    // And a .git file that is not a pointer at all is refused as what it is,
+    // not followed as if it were one.
+    write(&wt.join(".git"), b"something else entirely\n");
+    let text = sync::worktree(&wt).unwrap_err().to_string();
+    assert!(text.contains("not the gitdir pointer"), "{text}");
+}
+
+#[test]
+fn a_linked_working_tree_ships_the_repository_it_shares() {
+    let dir = scratch("worktree-plans");
+    let (main, wt) = hand_made_worktree(&dir, false);
+    let ssh = ssh_to("192.0.2.1");
+    let (plans, found) = sync::push_plans(
+        "rsync",
+        Path::new("/state/rsh"),
+        &ssh,
+        &wt,
+        "/pool/work/a-project",
+        &["/target/".to_string()],
+    )
+    .unwrap();
+    assert!(found.is_some());
+    assert_eq!(
+        plans.len(),
+        3,
+        "the tree, the shared half, this checkout's half"
+    );
+
+    // 1. The tree as before, but the pointer stays home: shipped, it would
+    //    shadow the repository the next two plans build.
+    let tree = &plans[0];
+    assert!(tree.args.contains(&"--delete".to_string()));
+    assert!(tree.args.contains(&"--exclude=/.git".to_string()));
+    assert!(
+        tree.args.contains(&"--exclude=/target/".to_string()),
+        "the tenant's own still apply"
+    );
+    assert_eq!(
+        tree.args[tree.args.len() - 1],
+        "192.0.2.1:/pool/work/a-project/"
+    );
+
+    // 2. The shared repository, mirrored into .git, without the registry of
+    //    worktrees that names paths on this machine.
+    let common = &plans[1];
+    let main_git = std::fs::canonicalize(main.join(".git")).unwrap();
+    assert!(common.args.contains(&"--delete".to_string()));
+    // By content. A branch ref is 41 bytes whatever it names, and the real
+    // git arm below caught rsync's size-and-mtime check leaving it stale.
+    assert!(
+        common.args.contains(&"--checksum".to_string()),
+        "{common:?}"
+    );
+    assert!(common.args.contains(&"--exclude=/worktrees/".to_string()));
+    // And gone from the receiver if it is already there, which it is on any
+    // guest that was synced from the main checkout first: this is the one
+    // place where excluded must not mean protected.
+    assert!(
+        common.args.contains(&"--delete-excluded".to_string()),
+        "{common:?}"
+    );
+    assert!(
+        !plans[0].args.contains(&"--delete-excluded".to_string()),
+        "the tree's own excludes stay protected"
+    );
+    assert_eq!(
+        common.args[common.args.len() - 2],
+        format!("{}/", main_git.display())
+    );
+    assert_eq!(
+        common.args[common.args.len() - 1],
+        "192.0.2.1:/pool/work/a-project/.git/"
+    );
+
+    // 3. This checkout's own metadata over the top: no --delete, or it would
+    //    strip the objects the previous plan just put there; and without the
+    //    two files that say "the repository is elsewhere".
+    let private = &plans[2];
+    assert!(
+        !private.args.contains(&"--delete".to_string()),
+        "{private:?}"
+    );
+    // And by content: the shared half has just put the other checkout's
+    // index here, same size, and the same mtime to the second when both were
+    // written together -- which is what the real-git arm below found.
+    assert!(
+        private.args.contains(&"--checksum".to_string()),
+        "{private:?}"
+    );
+    // The tree itself keeps the quick check: it is the big half, and its
+    // files are not fixed-size records rewritten in place.
+    assert!(!plans[0].args.contains(&"--checksum".to_string()));
+    assert!(private.args.contains(&"--exclude=/gitdir".to_string()));
+    assert!(private.args.contains(&"--exclude=/commondir".to_string()));
+    assert_eq!(
+        private.args[private.args.len() - 2],
+        format!("{}/", main_git.join("worktrees/wt").display())
+    );
+    assert_eq!(
+        private.args[private.args.len() - 1],
+        "192.0.2.1:/pool/work/a-project/.git/"
+    );
+
+    // A tenant who keeps .git home gets the one sync they asked for, even
+    // from a worktree: the pointer is excluded with the rest.
+    for spelling in [".git", "/.git", "/.git/"] {
+        let (plans, found) = sync::push_plans(
+            "rsync",
+            Path::new("/state/rsh"),
+            &ssh,
+            &wt,
+            "/pool/work/a-project",
+            &[spelling.to_string()],
+        )
+        .unwrap();
+        assert!(found.is_none(), "{spelling}");
+        assert_eq!(plans.len(), 1, "{spelling}");
+    }
+
+    // And an ordinary checkout is one plan with no mention of any of this.
+    let (plans, found) = sync::push_plans(
+        "rsync",
+        Path::new("/state/rsh"),
+        &ssh,
+        &main,
+        "/pool/work/a-project",
+        &[],
+    )
+    .unwrap();
+    assert!(found.is_none());
+    assert_eq!(plans.len(), 1);
+    assert!(!plans[0].args.contains(&"--exclude=/.git".to_string()));
+}
+
+/// Real git, real rsync: what lands on the far side must be a repository git
+/// can read, on the worktree's branch, with nothing to say about the tree.
+/// The argument assertions above cannot know whether the overlay order or
+/// the excluded files are right; only git can.
+#[test]
+fn a_real_worktree_arrives_as_a_repository_git_can_read() {
+    let rsync = rsync_binary();
+    let dir = scratch("worktree-real");
+    let rsh = local_rsh(&dir);
+    let ssh = ssh_to("127.0.0.1");
+
+    let git = |cwd: &Path, args: &[&str]| -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git is needed to make a worktree");
+        assert!(
+            out.status.success(),
+            "git {args:?} in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let main = dir.join("main");
+    std::fs::create_dir_all(&main).unwrap();
+    git(&main, &["init", "-q", "-b", "main"]);
+    write(&main.join("tracked.txt"), b"one\n");
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "-q", "-m", "one"]);
+    let wt = dir.join("wt");
+    git(
+        &main,
+        &["worktree", "add", "-q", "-b", "topic", wt.to_str().unwrap()],
+    );
+    write(&wt.join("tracked.txt"), b"two\n");
+    git(&wt, &["commit", "-q", "-am", "two"]);
+    // Uncommitted work travels too; that is the point of the channel.
+    write(&wt.join("new.rs"), b"");
+
+    let remote = dir.join("remote");
+    std::fs::create_dir_all(&remote).unwrap();
+    let (plans, found) =
+        sync::push_plans(&rsync, &rsh, &ssh, &wt, remote.to_str().unwrap(), &[]).unwrap();
+    // What a guest synced from the main checkout earlier still holds: that
+    // checkout's registry of worktrees, naming paths on this machine.
+    write(
+        &remote.join(".git/worktrees/wt/gitdir"),
+        b"/somewhere/on/the/workstation\n",
+    );
+    assert!(
+        found.is_some(),
+        "git made a worktree and the resolver must see it"
+    );
+    for plan in &plans {
+        plan.run().unwrap_or_else(|e| panic!("{e}: {plan:?}"));
+    }
+
+    assert!(remote.join(".git").is_dir(), "a repository, not a pointer");
+    assert_eq!(
+        git(&remote, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "topic"
+    );
+    assert_eq!(
+        git(&remote, &["rev-parse", "HEAD"]),
+        git(&wt, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(git(&remote, &["ls-files"]), "tracked.txt");
+    // The one check the battery actually runs: the tree is clean apart from
+    // the uncommitted file that really is new.
+    assert_eq!(git(&remote, &["status", "--porcelain"]), "?? new.rs");
+    assert!(
+        !remote.join(".git/worktrees").exists(),
+        "the registry of worktrees names paths on this machine, and one an \
+         earlier sync left there must go too"
+    );
+    assert!(!remote.join(".git/gitdir").exists());
+    assert!(!remote.join(".git/commondir").exists());
+
+    // Syncing again after a commit here keeps it a repository on the new
+    // head: the mirror of the shared half must not strip what the overlay
+    // put there, and the overlay must win on HEAD.
+    git(&wt, &["add", "new.rs"]);
+    git(&wt, &["commit", "-q", "-m", "three"]);
+    let (plans, _) =
+        sync::push_plans(&rsync, &rsh, &ssh, &wt, remote.to_str().unwrap(), &[]).unwrap();
+    for plan in &plans {
+        plan.run().unwrap_or_else(|e| panic!("{e}: {plan:?}"));
+    }
+    assert_eq!(
+        git(&remote, &["rev-parse", "HEAD"]),
+        git(&wt, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(git(&remote, &["status", "--porcelain"]), "");
+}
+
 /// Real rsync, real flags, no network. This is the test that would catch a
 /// wrong flag; the argument assertions above would not.
 #[test]

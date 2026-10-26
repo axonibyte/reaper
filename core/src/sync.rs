@@ -216,6 +216,206 @@ pub fn push(
     }
 }
 
+/// A linked working tree, as `git worktree add` makes one.
+///
+/// In such a tree `.git` is not a directory but a one-line file pointing at a
+/// directory inside the main checkout's repository -- which holds what makes
+/// this checkout *this* checkout (HEAD, the index, its reflogs) -- and that
+/// directory in turn names the repository the two checkouts share (objects,
+/// refs, config). Shipped as a file, the pointer names a path that does not
+/// exist on the guest, and every git invocation there fails with "not a git
+/// repository" -- one failing oracle at a time, in a battery that otherwise
+/// runs normally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worktree {
+    /// This checkout's own metadata: HEAD, index, logs.
+    pub private: PathBuf,
+    /// The repository it shares: objects, refs, config.
+    pub common: PathBuf,
+}
+
+/// Whether `tree` is a linked working tree, and of what.
+///
+/// `Ok(None)` for an ordinary checkout or no repository at all; both are
+/// synced as they are. An error only when `.git` is a pointer that cannot be
+/// followed -- a worktree whose main checkout has been moved or removed --
+/// because shipping it would cost a full battery to diagnose, and nothing
+/// here can make such a tree whole.
+pub fn worktree(tree: &Path) -> io::Result<Option<Worktree>> {
+    let dotgit = tree.join(".git");
+    match std::fs::symlink_metadata(&dotgit) {
+        Ok(m) if m.is_file() => {}
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let text = std::fs::read_to_string(&dotgit)?;
+    let Some(target) = text.lines().find_map(|l| l.strip_prefix("gitdir:")) else {
+        return Err(io::Error::other(format!(
+            "{} is a file, but not the gitdir pointer a linked working tree \
+             carries; git itself will not know what to make of it",
+            dotgit.display()
+        )));
+    };
+    let private = resolve(tree, target.trim());
+    if !private.is_dir() {
+        return Err(io::Error::other(format!(
+            "{} points at {}, which is not here. This is a linked working tree \
+             (git worktree) whose main checkout has been moved or removed, and \
+             the guest could do nothing with it either; `git worktree repair` \
+             from the main checkout is the cure",
+            dotgit.display(),
+            private.display()
+        )));
+    }
+    let commondir = private.join("commondir");
+    let common_text = std::fs::read_to_string(&commondir).map_err(|e| {
+        io::Error::other(format!(
+            "{} names no shared repository ({}): {e}",
+            private.display(),
+            commondir.display()
+        ))
+    })?;
+    let common = resolve(&private, common_text.trim());
+    if !common.is_dir() {
+        return Err(io::Error::other(format!(
+            "{} says the shared repository is at {}, which is not here",
+            commondir.display(),
+            common.display()
+        )));
+    }
+    Ok(Some(Worktree { private, common }))
+}
+
+/// A path from a git pointer file, against the directory the file lives in.
+fn resolve(base: &Path, target: &str) -> PathBuf {
+    let raw = Path::new(target);
+    let joined = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        base.join(raw)
+    };
+    // Cleaned up where that is possible, so the message a person reads and
+    // the source rsync is handed are the same path; left as joined when it
+    // does not exist, which is exactly when the message matters.
+    std::fs::canonicalize(&joined).unwrap_or(joined)
+}
+
+/// Whether the tenant has asked for `.git` to stay home.
+///
+/// Matched on the three spellings that mean the top-level directory and
+/// nothing else; a pattern like `*.git` is some other file's business.
+fn git_excluded(exclude: &[String]) -> bool {
+    exclude
+        .iter()
+        .any(|e| matches!(e.as_str(), ".git" | "/.git" | "/.git/" | ".git/"))
+}
+
+/// The forward syncs a tree needs: one for an ordinary checkout, three for a
+/// linked working tree.
+///
+/// For a worktree the pointer file stays home and a real repository is built
+/// at `<remote>/.git` from the two halves it points at: the shared repository
+/// first, mirrored (its `worktrees/` registry left out and removed if an
+/// earlier sync put it there, since it names paths on this machine), then this checkout's own metadata laid over the top
+/// without `--delete`, so that HEAD and the index are this branch's while the
+/// objects and refs are the repository's. The two files in it that point back
+/// here, `gitdir` and `commondir`, stay home too: on the guest the directory
+/// IS the repository, and git reads them as a claim that it is not.
+///
+/// Both repository halves go by `--checksum`, and the real-git arm in the
+/// suite is why. rsync's quick check takes equal size and equal mtime as
+/// "same file", and a repository is full of files that defeat it: a branch
+/// ref is 41 bytes whatever it names, and the shared half has just put the
+/// main checkout's index where this checkout's index is about to go -- same
+/// tracked set, same size. Written within a second of each other, both were
+/// skipped, and the guest was left on a stale commit with the other
+/// checkout's index, `git status` reporting every file modified twice over.
+/// A guest quietly building the wrong commit is the failure this channel
+/// exists to prevent, so the repository is compared by content; it costs a
+/// read of the repository on both sides per sync, and only for worktrees.
+///
+/// A tenant who excludes `.git` gets exactly the one sync they asked for,
+/// worktree or not.
+pub fn push_plans(
+    rsync: &str,
+    rsh: &Path,
+    ssh: &Ssh,
+    local: &Path,
+    remote: &str,
+    exclude: &[String],
+) -> io::Result<(Vec<Plan>, Option<Worktree>)> {
+    if git_excluded(exclude) {
+        return Ok((vec![push(rsync, rsh, ssh, local, remote, exclude)], None));
+    }
+    let Some(wt) = worktree(local)? else {
+        return Ok((vec![push(rsync, rsh, ssh, local, remote, exclude)], None));
+    };
+
+    let mut tree_exclude = vec!["/.git".to_string()];
+    tree_exclude.extend(exclude.iter().cloned());
+    let git_remote = format!("{}/.git", remote.trim_end_matches('/'));
+    let mut common = push(
+        rsync,
+        rsh,
+        ssh,
+        &wt.common,
+        &git_remote,
+        &["/worktrees/".to_string()],
+    );
+    common.args.insert(1, "--checksum".to_string());
+    // Excluded means protected on the receiver everywhere else in this
+    // module, and here that is the wrong rule: a guest that was synced from
+    // the main checkout before this tree became the source still holds that
+    // checkout's `worktrees/` registry, naming paths on this machine, and a
+    // protected exclude would leave it there for ever. Found on a live guest.
+    common.args.insert(2, "--delete-excluded".to_string());
+    let plans = vec![
+        push(rsync, rsh, ssh, local, remote, &tree_exclude),
+        common,
+        overlay(
+            rsync,
+            rsh,
+            ssh,
+            &wt.private,
+            &git_remote,
+            &["/gitdir".to_string(), "/commondir".to_string()],
+        ),
+    ];
+    Ok((plans, Some(wt)))
+}
+
+/// Into the session, adding to what is there: the shape of [`pull`] pointed
+/// the other way, and used only for the second half of a worktree's
+/// repository.
+fn overlay(
+    rsync: &str,
+    rsh: &Path,
+    ssh: &Ssh,
+    local: &Path,
+    remote: &str,
+    exclude: &[String],
+) -> Plan {
+    let mut args = vec![
+        "-a".to_string(),
+        // Content decides, not size and mtime; see `push_plans`.
+        "--checksum".to_string(),
+        format!("--timeout={}", ssh.io_timeout().as_secs().max(1)),
+    ];
+    args.extend(ownership());
+    for pattern in exclude {
+        args.push(format!("--exclude={pattern}"));
+    }
+    args.push("-e".into());
+    args.push(rsh.to_string_lossy().to_string());
+    args.push(dir(local));
+    args.push(format!("{}:{}", ssh.rsync_host(), with_slash(remote)));
+    Plan {
+        program: rsync.to_string(),
+        args,
+    }
+}
+
 /// How many paths a forward sync removed from the receiver.
 ///
 /// Read from rsync's own itemized output rather than inferred here, because

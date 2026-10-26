@@ -677,6 +677,94 @@ fn a_sync_pushes_the_tree_and_brings_results_back() {
 }
 
 #[test]
+fn a_sync_from_a_linked_working_tree_ships_a_repository_not_a_pointer() {
+    // reaper#3: a worktree's `.git` is a one-line pointer into the main
+    // checkout. Shipped as a file it names a path the guest does not have,
+    // and every git-dependent oracle there then runs on nothing.
+    let h = Harness::new("sync-worktree");
+    write(&h.dir.join(".reaper.toml"), FULL, None);
+    let main_git = h.dir.join("main-checkout/.git");
+    std::fs::create_dir_all(main_git.join("objects")).unwrap();
+    std::fs::create_dir_all(main_git.join("worktrees/here")).unwrap();
+    write(
+        &main_git.join("worktrees/here/HEAD"),
+        "ref: refs/heads/topic\n",
+        None,
+    );
+    write(&main_git.join("worktrees/here/commondir"), "../..\n", None);
+    write(
+        &h.dir.join(".git"),
+        &format!("gitdir: {}\n", main_git.join("worktrees/here").display()),
+        None,
+    );
+    h.ok(&["up"]);
+    h.forget_logs();
+
+    let out = h.ok(&["sync"]);
+    assert!(out.contains("linked working tree"), "said so: {out}");
+    assert!(out.contains("synced"), "{out}");
+
+    let rsync = h.log("rsync.log");
+    let lines: Vec<&str> = rsync.lines().collect();
+    assert_eq!(lines.len(), 4, "three pushes and one pull: {rsync}");
+    assert!(
+        lines[0].contains("--exclude=/.git"),
+        "the pointer stays home: {}",
+        lines[0]
+    );
+    assert!(
+        lines[0].contains("--exclude=/scratch/"),
+        "the tenant's own still apply: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("192.0.2.42:/a-pool/work/a-project/.git/"),
+        "{}",
+        lines[1]
+    );
+    assert!(lines[1].contains("--delete"), "{}", lines[1]);
+    assert!(
+        lines[2].contains("192.0.2.42:/a-pool/work/a-project/.git/"),
+        "{}",
+        lines[2]
+    );
+    assert!(
+        !lines[2].contains("--delete"),
+        "the overlay adds: {}",
+        lines[2]
+    );
+    assert!(
+        lines[3].contains("/a-pool/work/a-project/out/"),
+        "and results back: {}",
+        lines[3]
+    );
+
+    h.ok(&["down"]);
+}
+
+#[test]
+fn a_worktree_whose_repository_is_gone_is_refused_before_anything_is_synced() {
+    let h = Harness::new("sync-worktree-gone");
+    write(&h.dir.join(".reaper.toml"), FULL, None);
+    write(
+        &h.dir.join(".git"),
+        "gitdir: /nowhere/at/all/.git/worktrees/x\n",
+        None,
+    );
+    h.ok(&["up"]);
+    h.forget_logs();
+
+    let err = h.fails(&["sync"]);
+    assert!(err.contains("moved or removed"), "{err}");
+    assert!(err.contains("git worktree repair"), "names the cure: {err}");
+    // Two oracles: the refusal, and that nothing went. A sync that shipped
+    // the pointer and then complained would have cost the battery anyway.
+    assert_eq!(h.log("rsync.log").trim(), "", "nothing may be synced");
+
+    h.ok(&["down"]);
+}
+
+#[test]
 fn a_build_runs_in_the_declared_image_with_its_caches() {
     let h = Harness::new("build");
     write(&h.dir.join(".reaper.toml"), FULL, None);
