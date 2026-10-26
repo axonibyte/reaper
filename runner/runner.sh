@@ -552,6 +552,79 @@ cmd_pull() {
     fi
 }
 
+# What an interrupted reaper leaves behind.
+#
+# A tenant's job runs over a plain ssh session with no tty, and nothing on the
+# guest notices when the reaper that started it dies: sshd closes the pipes,
+# the shell running this script carries on, and a container engine's attached
+# client keeps its container running. Observed 2026-10-25: a `reaper test`
+# killed during its build left `npm ci` running inside a container; the next
+# `test` synced the tree and started a second `npm ci` into the same
+# node_modules, and the two raced -- ENOTEMPTY on an rmdir, a stale dist, then
+# `prettier: not found` three steps later, in a step that had nothing to do
+# with the cause. Only destroying the machine cured it.
+#
+# So exec leaves a record of itself -- its pid and process group, in the
+# project's control directory, which the host owns and no container sees --
+# and names its container after the project. The next exec of that project
+# stops both before it touches the tree. Only one job runs on a tree at a time,
+# and a job still going after the reaper that started it has returned is one
+# whose reaper did not return normally.
+exec_record()    { printf '%s/exec.running\n' "$(control_dir "$1")"; }
+exec_container() { printf 'reaper-%s\n' "$1"; }
+
+stop_stale_exec() {
+    stale_project=$1
+    stale_record=$(exec_record "${stale_project}")
+
+    if [ -f "${stale_record}" ]; then
+        stale_pid=""; stale_pgid=""; stale_since=""
+        read -r stale_pid stale_pgid stale_since < "${stale_record}" || :
+        if [ -n "${stale_pid}" ] && kill -0 "${stale_pid}" 2>/dev/null; then
+            # The pid is checked against what is running under it before
+            # anything is signalled. A record survives only when an exec was
+            # interrupted, and a guest that has been up for weeks will have
+            # handed that number to something else by then; a process group
+            # killed on the strength of a stale number is the one mistake here
+            # that cannot be taken back. No ps, or something that is not a
+            # runner: leave it alone and say so.
+            case "$(ps -o command= -p "${stale_pid}" 2>/dev/null)" in
+                *runner*exec*)
+                    log "an earlier exec of ${stale_project} (pid ${stale_pid}, since ${stale_since:-?}) is still running on this guest. Only one job runs on a tree at a time, and one still going after its reaper has returned is one whose reaper was interrupted; stopping it before this one starts"
+                    # The whole group, so the engine's attached client and the
+                    # job's own children go with it; the pid alone if the group
+                    # cannot be addressed.
+                    kill -TERM -- "-${stale_pgid:-0}" 2>/dev/null \
+                        || kill -TERM "${stale_pid}" 2>/dev/null || :
+                    stale_waited=0
+                    while kill -0 "${stale_pid}" 2>/dev/null && [ "${stale_waited}" -lt 10 ]; do
+                        sleep 1
+                        stale_waited=$((stale_waited + 1))
+                    done
+                    if kill -0 "${stale_pid}" 2>/dev/null; then
+                        kill -KILL -- "-${stale_pgid:-0}" 2>/dev/null \
+                            || kill -KILL "${stale_pid}" 2>/dev/null || :
+                    fi ;;
+                *)
+                    log "a record says an exec of ${stale_project} is running as pid ${stale_pid}, but that pid is not a runner now; leaving it alone" ;;
+            esac
+        fi
+        rm -f "${stale_record}"
+    fi
+
+    # The container, by the name exec gives it. `ps -a` rather than `ps`: a
+    # client that died without its --rm being honoured leaves a stopped one
+    # holding the name, and the next run would then be refused by the engine
+    # with a message about a name already in use. `rm -f` stops a running one
+    # first.
+    stale_engine=$(engine)
+    [ -n "${stale_engine}" ] || return 0
+    for stale_id in $("${stale_engine}" ps -a -q --filter "name=^$(exec_container "${stale_project}")\$" 2>/dev/null); do
+        log "an earlier exec of ${stale_project} left container ${stale_id} on this guest, most likely because the reaper that started it was interrupted; removing it before this one starts"
+        "${stale_engine}" rm -f -t 10 "${stale_id}" >&2 || log "could not remove ${stale_id}"
+    done
+}
+
 cmd_exec() {
     exec_project=""; exec_job=""; exec_image=""; exec_caches=""; COLD=""
 
@@ -597,11 +670,25 @@ cmd_exec() {
         mkdir -p "${exec_dir}" || die "cannot make the ${exec_c} cache"
     done
 
+    stop_stale_exec "${exec_project}"
+    mkdir -p "$(control_dir "${exec_project}")" || die "cannot make $(control_dir "${exec_project}")"
+    # pid, process group, and when: what the next exec needs to find this one
+    # if it is still here, and to say since when.
+    exec_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+    printf '%s %s %s\n' "$$" "${exec_pgid:-$$}" "$(date '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo ?)" \
+        > "$(exec_record "${exec_project}")"
+
+    exec_rc=0
     if [ -n "${exec_image}" ]; then
-        exec_in_container
+        exec_in_container || exec_rc=$?
     else
-        exec_on_host
+        exec_on_host || exec_rc=$?
     fi
+    # Gone the moment the job is, whatever it exited with: the record means
+    # "still running", and a record that outlived a normal exit would have
+    # the next exec reading pids that mean nothing.
+    rm -f "$(exec_record "${exec_project}")"
+    return "${exec_rc}"
 }
 
 exec_in_container() {
@@ -616,6 +703,7 @@ exec_in_container() {
     # would only accumulate. The job script is mounted read-only: nothing inside
     # has any business rewriting what it was asked to run.
     set -- run --rm \
+        --name "$(exec_container "${exec_project}")" \
         -w "${MOUNT_WORK}" \
         -v "${exec_work}:${MOUNT_WORK}" \
         -v "${exec_job}:${MOUNT_JOB}:ro" \

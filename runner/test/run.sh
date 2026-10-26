@@ -57,7 +57,7 @@ trap cleanup EXIT HUP INT TERM
 # are ordinary file utilities whose behaviour nothing here asserts.
 REAL_TOOLS="awk sed grep tr sort cat mkdir rm chmod cut head wc printf ln env sh
             basename dirname cp mv ls sleep nohup hostname date touch tail
-            readlink"
+            readlink ps"
 
 new_case() {
     CASE="$1"
@@ -190,7 +190,15 @@ zfs)
 podman)
     # `ps -q` has to answer with plausible ids, because the reset path iterates
     # over them. Anything else just records the call.
-    if [ "$1" = ps ]; then fix running_containers; else printf 'podman stub\n'; fi ;;
+    # A `ps` asking after one name answers from a different fixture, so a
+    # case can leave a stale named container behind without also having the
+    # reset path see it.
+    if [ "$1" = ps ]; then
+        case "$*" in
+            *--filter\ name=*) fix named_containers ;;
+            *)                 fix running_containers ;;
+        esac
+    else printf 'podman stub\n'; fi ;;
 *)
     # An unstubbed tool must be loud. Answering "fine" to a call nobody
     # modelled is how a suite ends up asserting nothing at all.
@@ -591,7 +599,7 @@ if run_runner exec --project a-project --job "${job}" \
      --image docker.io/library/example@sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef \
      --cache cargo --cache build-dir; then :; else bad "exec should have succeeded"; fi
 log_has 'podman run --rm'
-log_has 'run --rm -w /reaper/work'
+log_has 'run --rm --name reaper-a-project -w /reaper/work'
 log_has "${WORK}/pool/work/a-project:/reaper/work"
 log_has "${WORK}/job.sh:/reaper/job.sh:ro"
 log_has 'REAPER_WORK=/reaper/work'
@@ -676,6 +684,98 @@ saw "REAPER_OUT=${WORK}/pool/work/a-project/out"
 saw "REAPER_STATE=${WORK}/pool/state"
 saw "REAPER_CONTROL=${WORK}/pool/control/a-project"
 run_runner control --project a-project stop
+
+# ---- what an interrupted reaper leaves behind ------------------------------
+#
+# The defect (reaper#2): a `reaper test` killed during its build left `npm ci`
+# running in a container on the guest, and the next `test` started a second one
+# into the same node_modules. Nothing on the guest knew a job was still going.
+
+new_case "exec names its container after the project, so a later exec can find it"
+FAKE_PLATFORM=Linux
+with_engine
+job=$(a_job)
+run_runner workspace --project a-project
+if run_runner exec --project a-project --job "${job}" \
+     --image docker.io/library/example@sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef; then :; else bad "exec should have succeeded"; fi
+log_has 'run --rm --name reaper-a-project'
+# And looked for one by that name first -- stopped containers included, since
+# a client that died without its --rm honoured leaves one holding the name.
+log_has 'podman ps -a -q --filter name=^reaper-a-project\$'
+log_lacks 'podman rm'
+if [ -f "${WORK}/pool/control/a-project/exec.running" ]; then
+    bad "the record of a finished exec must not outlive it"
+else
+    ok "no record left after a normal exit"
+fi
+
+new_case "a container an interrupted exec left behind is removed before the next one starts"
+FAKE_PLATFORM=Linux
+with_engine
+job=$(a_job)
+run_runner workspace --project a-project
+fixture named_containers <<'EOF'
+cafe0123
+EOF
+if run_runner exec --project a-project --job "${job}" \
+     --image docker.io/library/example@sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef; then :; else bad "exec should have succeeded"; fi
+errsays 'left container cafe0123'
+errsays 'interrupted'
+log_has 'podman rm -f -t 10 cafe0123'
+# Removed BEFORE the new one runs, or the two would still overlap.
+if [ "$(grep -n 'podman rm -f' "${WORK}/log" | head -1 | cut -d: -f1)" -lt \
+     "$(grep -n 'podman run --rm' "${WORK}/log" | head -1 | cut -d: -f1)" ]; then
+    ok "removed it before starting"
+else
+    bad "the stale container must go before the new one starts"
+fi
+
+new_case "a host job an interrupted exec left behind is stopped before the next one starts"
+FAKE_PLATFORM=Linux
+job=$(a_job)
+run_runner workspace --project a-project
+# Stands in for the runner an interrupted reaper left running: its command
+# line is what the guard checks, and it names a runner doing an exec.
+printf '#!/bin/sh\nsleep 300\n' > "${WORK}/stale-runner.sh"
+sh "${WORK}/stale-runner.sh" exec --project a-project &
+stale=$!
+mkdir -p "${WORK}/pool/control/a-project"
+printf '%s %s 2026-10-25T14:00:00\n' "${stale}" "${stale}" > "${WORK}/pool/control/a-project/exec.running"
+if run_runner exec --project a-project --job "${job}"; then :; else bad "exec should have succeeded"; fi
+errsays "pid ${stale}, since 2026-10-25T14:00:00"
+errsays 'interrupted'
+if kill -0 "${stale}" 2>/dev/null; then
+    bad "the stale job is still running"
+    kill "${stale}" 2>/dev/null || :
+else
+    ok "the stale job was stopped"
+fi
+saw "^${WORK}/pool/work/a-project\$"
+if [ -f "${WORK}/pool/control/a-project/exec.running" ]; then
+    bad "the record of a finished exec must not outlive it"
+else
+    ok "no record left after a normal exit"
+fi
+
+new_case "a record naming a pid that is no longer a runner is left alone"
+FAKE_PLATFORM=Linux
+job=$(a_job)
+run_runner workspace --project a-project
+# The guest handed the recorded pid to something else since. Killing it on the
+# strength of the number would be the one mistake here that cannot be undone.
+sleep 300 &
+bystander=$!
+mkdir -p "${WORK}/pool/control/a-project"
+printf '%s %s 2026-10-25T14:00:00\n' "${bystander}" "${bystander}" > "${WORK}/pool/control/a-project/exec.running"
+if run_runner exec --project a-project --job "${job}"; then :; else bad "exec should have succeeded"; fi
+errsays 'not a runner now; leaving it alone'
+if kill -0 "${bystander}" 2>/dev/null; then
+    ok "the bystander was not touched"
+else
+    bad "a pid that is not a runner must not be signalled"
+fi
+kill "${bystander}" 2>/dev/null || :
+saw "^${WORK}/pool/work/a-project\$"
 
 new_case "host execution still hands over the caches, by their host paths"
 FAKE_PLATFORM=Linux

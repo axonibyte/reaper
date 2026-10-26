@@ -386,6 +386,7 @@ sweeper reads WARN "no evidence either way", never a false ok.
 | a suite that failed but `reaper test` exited 0 | Your `cmd` pipes, and `/bin/sh` is dash, which has no `pipefail`. See `docs/tenants.md` — this one also poisons `@pristine` |
 | `there is no "x" to reset to` from `test --to x` | A name that does not exist is an error, not a skip. Likely a typo |
 | `WARNING: TLS certificate verification is disabled` | Exactly what it says. Export the node's CA and switch `tls` to `ca-file` |
+| `an earlier exec of <project> … is still running on this guest … stopping it` | You interrupted a `build`, `run` or `test`, and its job kept going on the guest after the reaper that started it died. The next job of that project stops it first rather than racing it for the tree |
 
 If a session is unreachable and you want to know why, its console is readable
 through the API -- see
