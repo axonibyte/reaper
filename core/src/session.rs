@@ -198,6 +198,28 @@ impl Session {
         self.expires_at.duration_since(now).ok()
     }
 
+    /// What a listing shows under EXPIRES, as of `now`.
+    ///
+    /// `expires_at` means two different things in a session's life: until the
+    /// machine has answered it is the creation grace (`session.ready_grace`),
+    /// and after that it is the profile's TTL counted from readiness. The
+    /// number alone cannot say which, and a reader who saw `28m11s` on a
+    /// session brought up with a four-hour profile concluded the TTL was
+    /// being ignored, renewed needlessly, and reported a defect that was not
+    /// one. So the cell says so where the number is: `(grace)` while the
+    /// session is still living on its creation grace, nothing once the real
+    /// TTL applies, and `EXPIRED` when neither has any time left -- which is
+    /// not cosmetic, since the sweeper may take the machine at any moment.
+    pub fn expires_cell(&self, now: SystemTime) -> String {
+        match self.remaining(now) {
+            None => "EXPIRED".to_string(),
+            Some(left) if self.ready_at.is_none() => {
+                format!("{} (grace)", crate::duration::format_rough(left))
+            }
+            Some(left) => crate::duration::format_rough(left),
+        }
+    }
+
     pub fn age(&self, now: SystemTime) -> Duration {
         now.duration_since(self.created_at).unwrap_or_default()
     }

@@ -543,6 +543,37 @@ fn a_leftover_lock_file_of_any_age_is_not_a_lock() {
 }
 
 #[test]
+fn the_expires_cell_says_when_the_number_is_only_the_grace() {
+    // Issue #1: `28m11s` under EXPIRES on a session brought up with a
+    // four-hour profile read as the TTL being ignored. It was the creation
+    // grace, and nothing in the row said so.
+    let mut s = session("alpha", "m-1");
+    let now = s.created_at;
+    assert_eq!(
+        s.expires_cell(now),
+        "2h00m (grace)",
+        "not ready yet: the grace"
+    );
+    s.ready_at = Some(now + Duration::from_secs(5));
+    assert_eq!(
+        s.expires_cell(now),
+        "2h00m",
+        "ready: the real TTL, unmarked"
+    );
+    // Expired is expired whichever number it was; the sweeper does not care.
+    s.ready_at = None;
+    assert_eq!(
+        s.expires_cell(s.expires_at + Duration::from_secs(1)),
+        "EXPIRED"
+    );
+    s.ready_at = Some(now);
+    assert_eq!(
+        s.expires_cell(s.expires_at + Duration::from_secs(1)),
+        "EXPIRED"
+    );
+}
+
+#[test]
 fn remaining_time_runs_out_rather_than_going_negative() {
     let s = session("alpha", "m-1");
     assert_eq!(s.remaining(s.created_at), Some(Duration::from_secs(7200)));

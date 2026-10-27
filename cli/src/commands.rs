@@ -888,8 +888,10 @@ pub fn list() -> Result<()> {
     let (view, provider) = cluster_view();
 
     let now = SystemTime::now();
+    // EXPIRES is wide enough for the grace marker, which is the column's
+    // whole point: see `Session::expires_cell`.
     say!(
-        "{:<24} {:<16} {:<8} {:<10} {:<16} {}",
+        "{:<24} {:<16} {:<8} {:<16} {:<16} {}",
         "SESSION",
         "GUEST",
         "AGE",
@@ -906,18 +908,12 @@ pub fn list() -> Result<()> {
         if verdict == "REUSED" {
             reused.push(s.name.clone());
         }
-        let expires = match s.remaining(now) {
-            Some(d) => duration::format_rough(d),
-            // Not a cosmetic state: the sweeper may take this machine at any
-            // moment, and saying "expired" is the only honest thing to show.
-            None => "EXPIRED".to_string(),
-        };
         say!(
-            "{:<24} {:<16} {:<8} {:<10} {:<16} {}",
+            "{:<24} {:<16} {:<8} {:<16} {:<16} {}",
             s.name,
             s.guest,
             duration::format_rough(s.age(now)),
-            expires,
+            s.expires_cell(now),
             s.address
                 .map(|a| a.to_string())
                 .unwrap_or_else(|| "-".into()),

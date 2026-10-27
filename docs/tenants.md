@@ -342,6 +342,16 @@ again" should do that on your behalf. Start with `up`.
 Every verb acts on all of this project's sessions, so a manifest naming two
 guests tests both with one command. Name a session to act on just one.
 
+Interrupting `build`, `run` or `test` stops the reaper here; it does not stop
+the job there. The job runs over a plain ssh session, nothing on the guest is
+told when the client dies, and a container engine keeps an attached container
+running after its client has gone. So the job carries on, and a second one
+started into the same tree would race it -- which is what `npm ci` failing on
+an `rmdir` of its own node_modules looked like. The guest keeps a record of
+each job it is running, and the next job of the same project stops whatever
+that record still names before it touches the tree, saying so on stderr. If
+you want it stopped sooner, `reaper down` destroys the machine.
+
 `up` leaves one process behind: a heartbeat that renews the session's expiry
 until `down` stops it. `up` names its process identifier when it finishes, so
 a live `reaper` in `ps` afterwards can be told apart from an `up` that has not

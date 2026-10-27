@@ -1,7 +1,9 @@
 # CI for the Rust group -- bgone, ddwill, isolex, lychgate, reaper.
 #
 # Ported from rumor's .forgejo/workflows/ci.yml, and the discipline carries over
-# whole: ONE FreeBSD job; no actions/checkout; a timeout(1) on every external
+# whole: ONE FreeBSD job; no actions/checkout (a pull request is fetched by its
+# refs/pull/<n>/head from this repository, which is the only way a request from
+# a fork can be fetched at all); a timeout(1) on every external
 # call plus a timeout-minutes backstop; rc 124 reported separately from a
 # failure; `set -o pipefail`; redirect-then-read-status rather than a pipe; a
 # non-fatal probe first; and every step emitting a value only execution could
@@ -74,15 +76,37 @@ jobs:
         run: |
           set -o pipefail
           rc=0
-          timeout 180 git clone --quiet --depth 1 \
-            --branch "${GITHUB_REF_NAME:-main}" \
-            "${GITHUB_SERVER_URL:-https://forge.axonibyte.com}/${GITHUB_REPOSITORY}.git" \
-            src > clone.log 2>&1 || rc=$?
-          if [ "$rc" = 124 ]; then echo "clone did not answer in 180s"; exit 1; fi
-          if [ "$rc" != 0 ]; then echo "clone failed rc=$rc"; tail -5 clone.log; exit 1; fi
+          repo="${GITHUB_SERVER_URL:-https://forge.axonibyte.com}/${GITHUB_REPOSITORY}.git"
+          # A pull request's ref is refs/pull/<n>/head: not a branch, so
+          # `--branch` cannot name it, and for a request from a fork it names
+          # a commit that lives in the fork and not here. The base repository
+          # serves that ref itself, fork or not, so a pull request is fetched
+          # by it -- the request's own head, which is what the HEAD line
+          # below then names. A push or a tag is the branch or tag it says.
+          case "${GITHUB_REF:-}" in
+            refs/pull/*)
+              pr=${GITHUB_REF#refs/pull/}; pr=${pr%%/*}
+              what="pull request #${pr}"
+              timeout 180 git clone --quiet --depth 1 --no-checkout "$repo" src > clone.log 2>&1 || rc=$?
+              if [ "$rc" = 0 ]; then
+                timeout 180 git -C src fetch --quiet --depth 1 origin "refs/pull/${pr}/head" >> clone.log 2>&1 || rc=$?
+              fi
+              if [ "$rc" = 0 ]; then
+                git -C src checkout --quiet --detach FETCH_HEAD >> clone.log 2>&1 || rc=$?
+              fi ;;
+            *)
+              what="${GITHUB_REF_NAME:-main}"
+              timeout 180 git clone --quiet --depth 1 --branch "$what" "$repo" src > clone.log 2>&1 || rc=$? ;;
+          esac
+          if [ "$rc" = 124 ]; then echo "fetching $what did not answer in 180s"; exit 1; fi
+          if [ "$rc" != 0 ]; then echo "fetching $what failed rc=$rc"; tail -5 clone.log; exit 1; fi
+          echo "fetched: $what"
           echo "HEAD: $(git -C src rev-parse --short HEAD)"
-          crate=$(sed -n 's/^name *= *"\(.*\)"/\1/p' src/Cargo.toml | head -1)
-          ver=$(sed -n 's/^version *= *"\(.*\)"/\1/p' src/Cargo.toml | head -1)
+          # The CLI crate's manifest, not the root: the root is a workspace
+          # manifest with no name or version of its own, and a tag check that
+          # read it refused every tag with "declares no version".
+          crate=$(sed -n 's/^name *= *"\(.*\)"/\1/p' src/cli/Cargo.toml | head -1)
+          ver=$(sed -n 's/^version *= *"\(.*\)"/\1/p' src/cli/Cargo.toml | head -1)
           echo "crate: $crate version: $ver"
 
       - name: dependencies, from the lockfile and nowhere else
@@ -146,15 +170,16 @@ jobs:
           echo "executables built: $n (target x86_64-unknown-freebsd, the only stdlib on this runner)"
           [ "$n" -ge 1 ] || { echo "the release build produced no executable"; exit 1; }
 
-      - name: on a tag, the tag and Cargo.toml must agree
+      - name: on a tag, the tag and the CLI crate's version must agree
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           set -o pipefail
           cd src
           tag="${GITHUB_REF_NAME}"
-          ver=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
-          [ -n "$ver" ] || { echo "Cargo.toml declares no version"; exit 1; }
-          echo "tag=$tag Cargo.toml version=$ver"
+          # cli/Cargo.toml: the root is a workspace manifest with no version.
+          ver=$(sed -n 's/^version *= *"\(.*\)"/\1/p' cli/Cargo.toml | head -1)
+          [ -n "$ver" ] || { echo "cli/Cargo.toml declares no version"; exit 1; }
+          echo "tag=$tag cli/Cargo.toml version=$ver"
           case "$tag" in
             "v$ver"|"$ver") echo "they agree" ;;
             *) echo "REFUSED: tag $tag does not name version $ver"; exit 1 ;;
@@ -169,8 +194,8 @@ jobs:
           set -o pipefail
           cd src
           [ -n "$PACKAGE_TOKEN" ] || { echo "no PACKAGE_TOKEN secret: refusing to report a publish that cannot happen"; exit 1; }
-          crate=$(sed -n 's/^name *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
-          ver=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          crate=$(sed -n 's/^name *= *"\(.*\)"/\1/p' cli/Cargo.toml | head -1)
+          ver=$(sed -n 's/^version *= *"\(.*\)"/\1/p' cli/Cargo.toml | head -1)
           # A binary has no pom and no maven coordinate, so it goes to the
           # GENERIC registry: one PUT per file, the version in the path, read
           # back anonymously afterwards. The credential reaches curl through a
