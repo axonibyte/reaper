@@ -1,8 +1,10 @@
 #!/bin/sh
 # ci/build-target.sh  build a reaper release binary for one target triple.
 # Usage: sh ci/build-target.sh <target-triple>
-# All per-target knowledge (linkers, toolchains, std availability) lives here;
-# bitbucket-pipelines.yml just dispatches.
+# All per-target knowledge (linkers, toolchains, std availability) lives here.
+# The Bitbucket pipeline that dispatched it is gone; .forgejo/workflows/ci.yml
+# builds the one target its runner has and says why, and this script is kept
+# for whoever builds the other three somewhere that can.
 #
 # POSIX sh, and deliberately so: this project's invariant battery rejects
 # `pipefail` because /bin/sh is dash on the Debian image this runs in. Nothing
@@ -17,7 +19,7 @@ export CARGO_HOME="${CARGO_HOME:-${BITBUCKET_CLONE_DIR:-$PWD}/.cargo_cache}"
 
 # Pinned: -Z build-std against a floating nightly breaks spontaneously and
 # makes tag builds unreproducible. Bump deliberately, together with the image
-# pin in bitbucket-pipelines.yml.
+# pin of whatever dispatches this.
 NIGHTLY="nightly-2026-08-01"
 
 # reaper is the only shipped binary. The workspace's other four members are
@@ -40,8 +42,9 @@ apt_install() {
 # Zig ships FreeBSD libc headers, letting cargo-zigbuild cross-link FreeBSD
 # binaries from Linux with no docker and no sysroot images. Bitbucket runs
 # Linux containers and cannot host a VM, so cross-linking is the only route to
-# a FreeBSD artifact here; see the note in bitbucket-pipelines.yml about what
-# that trades away and what still checks it.
+# a FreeBSD artifact from there. What that trades away: the binary is linked
+# against Zig's copy of the FreeBSD libc, never run on FreeBSD by this script,
+# and a cross-link that succeeds proves it links, not that it works.
 install_zigbuild() {
     apt_install python3-pip
     pip3 install --break-system-packages cargo-zigbuild

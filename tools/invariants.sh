@@ -272,15 +272,21 @@ printf '\n--- the gate: what reviews the reviewers ---\n\n'
 # an exemption with nothing behind it, which is precisely a place for something
 # to hide later.
 #
-# The exemption is one file wide and nothing else. It is anchored and fully
-# spelled, so a sibling like bitbucket-pipelines.dev.yml is not covered. YAML
-# anywhere else in the tree still fails, and the companion check below still
-# refuses a YAML parser in the dependency tree, which is the half that would
-# put a YAML surface in reaper itself.
-sources | grep -E '\.(ya?ml)$' | grep -vE '^bitbucket-pipelines\.yml$' | offenders \
-    "no YAML files outside bitbucket-pipelines.yml" \
-    "This project speaks TOML everywhere. Bitbucket's pipeline format is the one
-exemption, and it is that one file. Convert the file."
+# Re-pointed again, 2026-10-26, when CI moved to the forge: the exempt place
+# is now .forgejo/, because Forgejo Actions reads workflows only as YAML under
+# .forgejo/workflows/ and offers no TOML form -- so, as before, the vendor
+# chose and this project did not get a vote. bitbucket-pipelines.yml was
+# deleted in the same change, for the reason given above about exemptions
+# with nothing behind them. A directory rather than one file this time,
+# because the vendor also decides what else lives there (further workflows,
+# a runner config); it is anchored at the top of the tree, so a .forgejo
+# elsewhere is not covered. YAML anywhere else in the tree still fails, and
+# the companion check below still refuses a YAML parser in the dependency
+# tree, which is the half that would put a YAML surface in reaper itself.
+sources | grep -E '\.(ya?ml)$' | grep -vE '^\.forgejo/' | offenders \
+    "no YAML files outside .forgejo/" \
+    "This project speaks TOML everywhere. The forge's workflow format is the one
+exemption, and it lives in that one directory. Convert the file."
 
 sources | grep -E 'Cargo\.(toml|lock)$' | xargs grep -n 'yaml' 2>/dev/null | offenders \
     "no YAML parser in the dependency tree" \

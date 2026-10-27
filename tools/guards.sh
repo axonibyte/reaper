@@ -70,8 +70,12 @@ guard_tenant() {
         return
     fi
 
+    # .forgejo/ is allowed, 2026-10-26: the workflow's own header explains why
+    # it runs where it does by naming the sibling repositories that share the
+    # runner, and it is vendor CI configuration that no reaper code reads. The
+    # cost is stated below, at the guest seam, once for all three seams.
     scan "tenant seam" \
-        '^(docs/|manifest/examples/)' \
+        '^(docs/|manifest/examples/|\.forgejo/)' \
         "\\b(${names})\\b" \
         "A tenant name appeared in framework code. Tenants are configuration:
 they belong in their own .reaper.toml and in manifest/examples, and
@@ -93,11 +97,23 @@ guard_guest() {
     # with a platform sub-module; it is a single shell script delivered over
     # SSH, so the directory is the boundary.
     #
-    # bitbucket-pipelines.yml and ci/ are allowed because they name *build
-    # hosts*, not guests, and the two are unrelated questions. This seam exists
-    # so that adding a guest system is a template build and a registry entry
-    # rather than a code change; a release matrix saying which machines compile
-    # the binary cannot make that false, and no reaper code reads these files.
+    # .forgejo/ and ci/ are allowed because they name *build hosts*, not
+    # guests, and the two are unrelated questions. This seam exists so that
+    # adding a guest system is a template build and a registry entry rather
+    # than a code change; a release matrix saying which machines compile the
+    # binary cannot make that false, and no reaper code reads these files.
+    #
+    # .forgejo/ replaced bitbucket-pipelines.yml here on 2026-10-26, when CI
+    # moved to the forge and that file was deleted, and it is allowed by the
+    # tenant and provider seams as well, which the Bitbucket file was not: the
+    # workflow's header explains why the job runs on the host rather than in
+    # the jail, and that explanation names the hypervisor whose API the suite
+    # stands in for and the sibling repositories that share the runner. Be
+    # honest about the cost, as the provider seam is below: the directory is
+    # skipped wholesale, so a workflow that reached for the hypervisor's API
+    # itself would pass these seams and has to be caught in review. The
+    # alternative -- a workflow that may not say why it is shaped the way it
+    # is -- was judged worse. Cal's call.
     #
     # This replaces the .github/workflows/ exemption rather than adding to it.
     # That directory was deleted when the repository moved to Bitbucket, and
@@ -106,11 +122,12 @@ guard_guest() {
     # to link. An exemption kept alive after its files are gone is a place
     # coupling can hide, so it went with them.
     #
-    # Narrow deliberately: one named file and one directory, and the tenant and
-    # provider seams below still apply to both in full -- a pipeline naming a
-    # tenant, or reaching for a hypervisor's API, is still a failure.
+    # Narrow deliberately: two directories. The tenant and provider seams
+    # below still apply to ci/ in full -- a build script naming a tenant, or
+    # reaching for a hypervisor's API, is still a failure. .forgejo/ is the
+    # exception, explained above.
     scan "guest seam" \
-        '^(docs/|README\.md$|manifest/examples/|\.reaper\.toml$|runner/|tools/guards\.sh$|bitbucket-pipelines\.yml$|ci/)' \
+        '^(docs/|README\.md$|manifest/examples/|\.reaper\.toml$|runner/|tools/guards\.sh$|\.forgejo/|ci/)' \
         'systemctl|systemd|apt-get|dpkg |zfsutils-linux|/dev/(vd|vtbd|sd|nvme)[a-z0-9]|rc\.conf|\brc\.d\b|\b(ubuntu|debian|freebsd|alpine|centos|fedora)\b' \
         "An operating system leaked out of the runner's platform modules. The
 guest seam exists so that adding a system is a template build and a
@@ -134,7 +151,7 @@ guard_provider() {
     # registry re-exports a stand-in neutrally, so no exemption is required. An
     # exemption is a place coupling can hide; not needing one is better.
     scan "provider seam" \
-        '^(docs/|README\.md$|Cargo\.toml$|Cargo\.lock$|providers/|cull/|tools/guards\.sh$)' \
+        '^(docs/|README\.md$|Cargo\.toml$|Cargo\.lock$|providers/|cull/|tools/guards\.sh$|\.forgejo/)' \
         '\bpve\b|\bvmid\b|\bupid\b|proxmox|pveapitoken|\b(9000|9099)\b' \
         "Hypervisor vocabulary leaked into the core. Machine identifiers,
 identifier ranges, resource pools, task handles and API tokens belong

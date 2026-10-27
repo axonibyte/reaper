@@ -23,9 +23,9 @@ token.*
 \#*#
 .DS_Store
 
-# A CARGO_HOME that bitbucket-pipelines.yml puts inside the workspace, because
-# the workspace is the only thing a Pipelines cache can be keyed on and reach.
-# Never present on a workstation.
+# A CARGO_HOME that ci/build-target.sh puts inside the workspace, because the
+# workspace was the only thing the Bitbucket pipeline that dispatched it could
+# key a cache on and reach. Never present on a workstation.
 /.cargo_cache/
 
 # Release binaries on their way to Bitbucket Downloads, assembled by

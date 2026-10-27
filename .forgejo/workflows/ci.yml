@@ -64,7 +64,7 @@ jobs:
         run: |
           set -o pipefail
           echo "runner: $(uname -srm)"
-          for t in git cargo rustc; do
+          for t in git cargo rustc shellcheck shfmt; do
             p=$(command -v "$t" 2>/dev/null) || p=""
             if [ -n "$p" ]; then echo "$t: $p"; else echo "$t: ABSENT"; fi
           done
@@ -151,6 +151,24 @@ jobs:
           p=$(grep -E '^test result' ../test.log | sed -n 's/.*ok\. \([0-9]*\) passed.*/\1/p' | awk '{s+=$1} END {print s+0}')
           echo "tests passed: $p"
           [ "$p" -gt 0 ] || { echo "zero tests ran, which is not a pass"; exit 1; }
+
+      - name: the local gate, so the forge cannot pass a tree tools/check.sh refuses
+        run: |
+          set -o pipefail
+          cd src
+          rc=0
+          # Everything the README names as the gate before a commit: the
+          # warnings build, the shell lint, the seam guards, the invariants,
+          # the manifest and runner suites, the sweepers. Until this step
+          # existed the forge was green on a tree the gate refused (#5), which
+          # is the one shape a gate must not have. The shell lint wants
+          # shellcheck and shfmt on this runner and refuses to pass without
+          # them, by its own design; the probe above says whether they are.
+          timeout 1500 ./tools/check.sh > ../check.log 2>&1 || rc=$?
+          if [ "$rc" = 124 ]; then echo "tools/check.sh did not answer in 1500s"; exit 1; fi
+          grep -E '^=== |^FAILED:|passed, |invariants failed|^FAIL ' ../check.log | tail -40
+          [ "$rc" = 0 ] || { echo "tools/check.sh rc=$rc"; exit 1; }
+          echo "the local gate agrees with the forge"
 
       - name: the release build, for the one target this runner has
         run: |
