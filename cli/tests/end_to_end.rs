@@ -3596,3 +3596,353 @@ fn a_failed_job_names_the_log_its_output_went_to() {
     let _ = std::fs::remove_file(h.dir.join("ssh.fail"));
     h.ok(&["down"]);
 }
+
+// ============================================================ reaper auto
+//
+// `auto` is driven through the real binary against a stand-in forge that
+// answers HTTP, so the adapter's protocol handling is under test as well as
+// the loop. The git side is a real bare repository holding a real
+// refs/pull/1/head, because "fetch the request's commit" is the step most
+// likely to be subtly wrong and a faked fetch would prove nothing about it.
+
+use reaper_forges::mock::{StandIn as ForgeStandIn, NAME as FORGE};
+
+/// Everything `auto` needs around a harness: a clone, an upstream carrying a
+/// review request, and a forge that knows about it.
+struct AutoSetup {
+    forge: ForgeStandIn,
+    /// The commit at the tip of request 1.
+    head: String,
+    upstream: PathBuf,
+}
+
+impl Harness {
+    fn git(&self, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&self.dir)
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn set_up_auto(&self) -> AutoSetup {
+        // Ignore everything the harness itself writes into this directory --
+        // config, logs, session state. Without this the tree is dirty and
+        // `auto` correctly refuses to check out over it, which would make
+        // every test here a test of that refusal.
+        write(
+            &self.dir.join(".gitignore"),
+            "*\n!.gitignore\n!.reaper.toml\n",
+            None,
+        );
+        self.git(&["init", "--quiet", "--initial-branch=main"]);
+        // An identity, because a commit needs one and a build host may have
+        // none configured.
+        self.git(&["config", "user.email", "auto@example.invalid"]);
+        self.git(&["config", "user.name", "reaper auto test"]);
+        self.git(&["add", ".gitignore", ".reaper.toml"]);
+        self.git(&["commit", "--quiet", "-m", "base"]);
+
+        // The upstream lives OUTSIDE the clone: inside it, it would be
+        // untracked content in the tree that sync then copies into a guest.
+        let upstream = self.dir.with_extension("upstream.git");
+        let out = Command::new("git")
+            .args(["init", "--quiet", "--bare"])
+            .arg(&upstream)
+            .output()
+            .expect("run git init --bare");
+        assert!(out.status.success(), "bare init: {out:?}");
+
+        self.git(&["remote", "add", "origin", &upstream.display().to_string()]);
+        self.git(&["push", "--quiet", "origin", "HEAD:refs/heads/main"]);
+
+        // The request's head: a commit the clone does not have checked out,
+        // published where the forge convention says to look for it. Empty so
+        // the tree is byte-identical and the battery behaves the same -- what
+        // is under test is the plumbing, not the change.
+        self.git(&["commit", "--quiet", "--allow-empty", "-m", "request one"]);
+        let head = self.git(&["rev-parse", "HEAD"]);
+        self.git(&[
+            "push",
+            "--quiet",
+            "origin",
+            &format!("HEAD:refs/pull/1/head"),
+        ]);
+        self.git(&["checkout", "--quiet", "main"]);
+        self.git(&["reset", "--hard", "--quiet", "origin/main"]);
+
+        let forge = ForgeStandIn::start();
+        forge.add_request(1, "a change", &head);
+
+        // The remote is a filesystem path, so the adapter is told where the
+        // API is and which repository this is.
+        let cfg = self.dir.join("config.toml");
+        let mut text = std::fs::read_to_string(&cfg).unwrap();
+        text.push_str(&format!(
+            "\n[forges.{FORGE}]\nurl = \"{}\"\nrepo = \"o/n\"\ntoken = \"{}\"\n",
+            forge.base(),
+            ForgeStandIn::token_value(),
+        ));
+        write(&cfg, &text, None);
+
+        AutoSetup {
+            forge,
+            head,
+            upstream,
+        }
+    }
+
+    fn auto(&self, extra: &[&str]) -> Output {
+        let mut args = vec!["auto", "--once", "--forge", FORGE, "--poll", "1s"];
+        args.extend_from_slice(extra);
+        self.run(&args)
+    }
+}
+
+impl Drop for AutoSetup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.upstream);
+    }
+}
+
+#[test]
+fn auto_tests_an_open_request_and_rebase_merges_it_when_green() {
+    let h = Harness::new("auto-green");
+    let s = h.set_up_auto();
+
+    let out = h.auto(&[]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "auto failed:\n{text}");
+
+    assert_eq!(s.forge.merged(), vec![1], "the request should be landed:\n{text}");
+    assert!(
+        s.forge.own_comments(1).is_empty(),
+        "a green request that merged needs no comment: {:?}",
+        s.forge.own_comments(1)
+    );
+    // And it really did run the battery against the request's commit, not
+    // against whatever the clone happened to have checked out.
+    assert!(
+        text.contains(&s.head[..12]),
+        "should name the commit it tested:\n{text}"
+    );
+    h.ok(&["down"]);
+}
+
+#[test]
+fn auto_comments_the_failures_when_the_battery_is_red_and_does_not_merge() {
+    let h = Harness::new("auto-red");
+    let s = h.set_up_auto();
+    h.make_ssh_fail("exec --project");
+
+    let out = h.auto(&[]);
+    assert!(
+        out.status.success(),
+        "a red battery is a verdict, not an error for auto itself:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(s.forge.merged().is_empty(), "a red request must not land");
+    let said = s.forge.own_comments(1);
+    assert_eq!(said.len(), 1, "expected one verdict comment, got {said:?}");
+    let body = &said[0];
+    assert!(body.contains(&s.head), "the verdict must name the commit:\n{body}");
+    assert!(
+        reaper_core::forge::already_judged(&s.head, &said),
+        "and must be recognisable as a verdict:\n{body}"
+    );
+    assert!(
+        body.contains("```") && body.len() > 100,
+        "and must carry the battery's output, not just a verdict line:\n{body}"
+    );
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("battery red"), "auto should say so too:\n{text}");
+    h.ok(&["down"]);
+}
+
+#[test]
+fn auto_leaves_a_request_alone_once_it_has_judged_that_commit() {
+    let h = Harness::new("auto-skip");
+    let s = h.set_up_auto();
+    h.make_ssh_fail("exec --project");
+    h.auto(&[]);
+    assert_eq!(s.forge.own_comments(1).len(), 1, "first pass should comment");
+
+    // Second pass: same commit, verdict already given.
+    let out = h.auto(&[]);
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(
+        s.forge.own_comments(1).len(),
+        1,
+        "the same commit must not be judged twice"
+    );
+    assert!(
+        text.contains("already judged"),
+        "and auto should say why it did nothing:\n{text}"
+    );
+    h.ok(&["down"]);
+}
+
+#[test]
+fn a_comment_from_a_person_does_not_count_as_a_verdict() {
+    // The rule is "has THIS COMMIT been judged", not "has anyone spoken". A
+    // time-based rule would let any comment silence the request for good.
+    let h = Harness::new("auto-foreign");
+    let s = h.set_up_auto();
+    s.forge
+        .add_foreign_comment(1, "someone-else", "please look at this");
+
+    let out = h.auto(&[]);
+    assert!(out.status.success(), "{:?}", out);
+    assert_eq!(
+        s.forge.merged(),
+        vec![1],
+        "a bystander's comment must not stop the battery"
+    );
+    h.ok(&["down"]);
+}
+
+#[test]
+fn auto_stops_the_battery_when_a_commit_lands_mid_run_and_discards_the_session() {
+    let h = Harness::new("auto-superseded");
+    let s = h.set_up_auto();
+    h.ok(&["up"]);
+    h.forget_logs();
+
+    // One ssh invocation inside the battery takes longer than the poll, so
+    // there is a window in which a commit can land.
+    write(&h.dir.join("slow"), "6", None);
+
+    // A scoped thread, so the stand-in can be reached directly rather than
+    // through HTTP, and nothing has to be 'static.
+    let out = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            // Long enough that the battery is running, short enough to land
+            // inside the slow command's window.
+            std::thread::sleep(Duration::from_millis(2500));
+            s.forge
+                .set_head(1, "ffffffffffffffffffffffffffffffffffffffff");
+        });
+        h.auto(&[])
+    });
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Specifically mid-battery, not merely "something noticed eventually".
+    // Accepting the post-battery message here too would let this test pass
+    // with the interrupt removed entirely, since the check before the merge
+    // would catch the same change one step later.
+    assert!(
+        text.contains("mid-battery"),
+        "auto should say it stopped the battery, not that it noticed afterwards:\n{text}"
+    );
+    assert!(
+        s.forge.merged().is_empty(),
+        "nothing may be landed on a battery that was abandoned:\n{text}"
+    );
+    assert!(
+        s.forge.own_comments(1).is_empty(),
+        "and no verdict may be posted either: {:?}",
+        s.forge.own_comments(1)
+    );
+    // An interrupted battery leaves a half-synced tree in the guest, so the
+    // machine must be gone rather than reused.
+    assert!(
+        h.machines().is_empty(),
+        "the session should have been destroyed, not kept: {:?}",
+        h.machines()
+    );
+}
+
+#[test]
+fn auto_refuses_to_check_out_over_uncommitted_work() {
+    let h = Harness::new("auto-dirty");
+    let _s = h.set_up_auto();
+    // Tracked, modified: the one thing .gitignore cannot hide.
+    write(&h.dir.join(".reaper.toml"), "\n# edited\n", None);
+
+    let out = h.auto(&[]);
+    let text = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "should refuse:\n{text}");
+    assert!(
+        text.contains("uncommitted changes"),
+        "and should say what is in the way:\n{text}"
+    );
+}
+
+#[test]
+fn a_dry_run_decides_but_changes_nothing_on_the_forge() {
+    let h = Harness::new("auto-dry");
+    let s = h.set_up_auto();
+
+    let out = h.auto(&["--dry-run"]);
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("would rebase-and-merge"), "{text}");
+    assert!(s.forge.merged().is_empty(), "a dry run must not merge");
+    assert!(s.forge.own_comments(1).is_empty(), "nor comment");
+    h.ok(&["down"]);
+}
+
+#[test]
+fn auto_says_so_and_stops_when_there_is_nothing_open() {
+    let h = Harness::new("auto-idle");
+    let s = h.set_up_auto();
+    s.forge.close_request(1);
+
+    let out = h.auto(&[]);
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("nothing open"), "{text}");
+}
+
+#[test]
+fn a_commit_landing_after_the_battery_is_caught_before_the_merge() {
+    // The window the mid-battery poll cannot cover: between the battery
+    // finishing and the merge going in. Without the re-check this lands a
+    // commit that was never tested, which is the worst outcome this verb has.
+    //
+    // Staged on the stand-in rather than on a timer: the new commit appears on
+    // the next single-request read, and the poll is long enough that no
+    // in-battery poll can consume it first, so the read that sees it is the
+    // one before the merge.
+    let h = Harness::new("auto-late");
+    let s = h.set_up_auto();
+    s.forge
+        .set_head_on_next_read(1, "ffffffffffffffffffffffffffffffffffffffff");
+
+    let out = h.run(&["auto", "--once", "--forge", FORGE, "--poll", "30s"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("after the battery"),
+        "auto should say the head moved after it ran:\n{text}"
+    );
+    assert!(
+        s.forge.merged().is_empty(),
+        "a commit that was never tested must not be landed:\n{text}"
+    );
+    assert!(
+        s.forge.own_comments(1).is_empty(),
+        "and no verdict belongs on a commit we did not judge: {:?}",
+        s.forge.own_comments(1)
+    );
+    h.ok(&["down"]);
+}

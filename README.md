@@ -60,12 +60,13 @@ tank/state    your project's state         -- rolled back freely
 tank/work     synced tree + results out    -- never rolled back
 ```
 
-## The three seams
+## The four seams
 
 `reaper` hosts any program with an end-to-end battery. It does not decline on
 the grounds of what your program is, what it is written in, or what it runs on.
-That resolves into three independent seams, which fail differently and are
-therefore kept apart:
+It also does not decline on the grounds of where your code is hosted. That
+resolves into four independent seams, which fail differently and are therefore
+kept apart:
 
 **Tenant.** No tenant name appears anywhere in framework code. The framework
 never learns tenant vocabulary -- it does not know what a "stage", "journey",
@@ -83,6 +84,15 @@ build, never a code change. See [`docs/guests.md`](docs/guests.md).
 implementation ships. The door is left open a crack for a second, and no wider:
 no dynamic loading, no ABI, no plugin boundary. A new provider is a new module
 compiled in. See [`docs/providers.md`](docs/providers.md).
+
+**Forge.** `reaper auto` has to ask a forge what is open and tell it what the
+battery decided, and the vocabulary for that differs per vendor while the
+questions do not. Five questions sit behind a trait -- what is open, what is at
+the tip of it, what have I already said, how do I say something, how do I land
+it -- and which adapter a repository gets is one decision in one registry, made
+from the git remote. Two implementations ship. A fourth lint guard enforces it,
+and it reads the names it polices out of the registry's own list so that adding
+an adapter puts it under guard with no edit to the guard.
 
 ## Scope fence
 
@@ -330,6 +340,18 @@ Each step is also a verb of its own, for when you want one without the others:
 | `reaper reset [--to NAME]` | state back to a known point, in seconds |
 | `reaper test --to NAME` | the loop, resetting to a named point rather than pristine |
 | `reaper snapshot NAME` | name a point to come back to |
+
+And one verb that drives the others rather than the session:
+
+| | |
+|---|---|
+| `reaper auto [PATH]` | watch a forge; test each open review request, then land it or say why not |
+
+`auto` is the loop above with nobody standing over it: it fetches a request's
+head, runs the battery, and either rebase-merges the request or comments the
+failures on it. A commit landing mid-battery stops the battery and starts
+again. See [`docs/auto.md`](docs/auto.md) -- including what it will never do,
+and the three windows a new commit can arrive in.
 | `reaper list` | what is up, how long it has left, whether its heartbeat is alive |
 | `reaper renew [--ttl 4h]` | more time |
 
