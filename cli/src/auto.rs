@@ -314,14 +314,26 @@ fn battery(
         readers.push(std::thread::spawn(move || drain(pipe, &sink)));
     }
 
+    // Two cadences, which an earlier version of this conflated by sleeping
+    // `min(poll, 10s)` and asking the forge on every wake: noticing the child
+    // has exited wants to be prompt, and asking the forge wants to be no more
+    // often than the operator said. Sleeping the poll interval whole makes a
+    // finished battery sit unnoticed for up to a minute; sleeping a tenth of
+    // it asks the forge ten times too often, which on a long battery is a
+    // great many calls for a question whose answer rarely changes.
+    let mut asked = std::time::Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        std::thread::sleep(opts.poll.min(Duration::from_secs(10)));
+        std::thread::sleep(Duration::from_millis(500));
         if let Some(status) = child.try_wait()? {
             break status;
         }
+        if asked.elapsed() < opts.poll {
+            continue;
+        }
+        asked = std::time::Instant::now();
         match forge.head_of(req.number) {
             Ok(now) if now != req.head => {
                 kill(&mut child);
