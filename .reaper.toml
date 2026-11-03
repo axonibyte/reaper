@@ -64,8 +64,17 @@ run = { cmd = "./runner/test/run.sh" }
 # this means. The right answer is a builder image with them baked in;
 # inventing one nobody has built would be the worse kind of wrong, which is
 # the same call manifest/examples/README.md records.
+#
+# The rustup line is there for the same reason and was found the same way. The
+# official Rust images install their toolchain with rustup's MINIMAL profile,
+# which carries neither rustfmt nor clippy -- so when tools/check.sh learned to
+# run both, this battery went red with the gate's own "install it rather than
+# skipping the check" message. That is the gate behaving correctly: a check
+# that passed because its tool was absent would be worse than no check. The
+# environment is what has to change, and the environment is the tenant's.
 cmd = """
 apt-get -qq update && apt-get -qq install -y rsync shellcheck jq && \
+rustup component add rustfmt clippy && \
 CARGO_HOME=$REAPER_CACHE_CARGO \
 CARGO_TARGET_DIR=$REAPER_CACHE_TARGET \
 cargo test --workspace --locked && \

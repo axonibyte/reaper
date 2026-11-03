@@ -28,6 +28,8 @@ decisions below. Phase 2 is parallel-safe with Phase 1; nothing else is.
 
 | Check | What it proves |
 |---|---|
+| `cargo fmt --all --check` | The tree is formatted, and the check refuses to pass when rustfmt is missing |
+| `cargo clippy --workspace --all-targets` | No clippy lint anywhere, tests included, warnings denied |
 | `tools/lint-shell.sh` | Every shell script is shellcheck-clean, and the linter refuses to pass when shellcheck is missing |
 | `tools/guards.sh` | No tenant, operating system, hypervisor or forge has leaked out of its seam |
 | `manifest/test/run.sh` | The schema accepts what it should and rejects what it claims to |
