@@ -1,0 +1,20 @@
+[package]
+name = "reaper-forges"
+description = "Selects a forge adapter from a remote URL."
+version = "0.3.1"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# Re-exports a forge stand-in. The CLI's end-to-end tests need *a* forge to
+# drive; routing it through here keeps the CLI's manifest free of any forge's
+# name, in dev-dependencies as well as in dependencies.
+mock = ["reaper-forge-forgejo/mock"]
+
+[dependencies]
+reaper-core = { path = "../../core" }
+reaper-forge-forgejo = { path = "../forgejo" }
+reaper-forge-github = { path = "../github" }
+toml = "0.9"

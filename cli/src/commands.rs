@@ -15,7 +15,7 @@ use reaper_core::{config, duration, job};
 use reaper_manifest::{Exec, Manifest};
 
 pub type Error = Box<dyn std::error::Error>;
-type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 fn load_config() -> Result<Config> {
     Ok(config::load()?)

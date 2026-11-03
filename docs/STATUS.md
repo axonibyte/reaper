@@ -4,7 +4,7 @@ Where the work actually stands. When this document disagrees with any other,
 trust this one -- the rest describe intended shapes, this describes the shape
 that exists.
 
-Last updated: 2026-08-13.
+Last updated: 2026-11-02.
 
 ## Phases
 
@@ -17,6 +17,7 @@ Last updated: 2026-08-13.
 | 4 | `reset` and the `@pristine` snapshot | **Accepted live.** Reset, named checkpoints, and an in-guest trigger a container can call |
 | 5 | The loop as one verb | **Accepted live**, and now proven by a tenant that is not reaper |
 | 6 | Hardening, `doctor`, third-tenant proof | **`doctor` done, canary included.** Structured session log and third-tenant proof remain |
+| 7 | `auto`: the loop with nobody standing over it | **Complete against a stand-in forge; not yet run against a live one.** Forge seam, two adapters, and the verb |
 
 Phase detail is in [`reaper-plan.md`](reaper-plan.md) §6, amended by the
 decisions below. Phase 2 is parallel-safe with Phase 1; nothing else is.
@@ -28,7 +29,7 @@ decisions below. Phase 2 is parallel-safe with Phase 1; nothing else is.
 | Check | What it proves |
 |---|---|
 | `tools/lint-shell.sh` | Every shell script is shellcheck-clean, and the linter refuses to pass when shellcheck is missing |
-| `tools/guards.sh` | No tenant, operating system or hypervisor has leaked out of its seam |
+| `tools/guards.sh` | No tenant, operating system, hypervisor or forge has leaked out of its seam |
 | `manifest/test/run.sh` | The schema accepts what it should and rejects what it claims to |
 
 `cargo test --workspace` runs the Rust suites, including the CLI driven end to

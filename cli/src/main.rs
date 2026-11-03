@@ -11,6 +11,7 @@
 #[macro_use]
 mod out;
 
+mod auto;
 mod commands;
 
 use std::path::PathBuf;
@@ -104,6 +105,31 @@ enum Command {
         session: Option<String>,
         #[arg(long)]
         manifest: Option<PathBuf>,
+    },
+
+    /// Watch a forge and judge what shows up: fetch each open review
+    /// request in turn, run the battery, then land it or say why not.
+    Auto {
+        /// A local clone. Defaults to the working directory.
+        path: Option<PathBuf>,
+        /// Which adapter, overriding what the remote implies.
+        #[arg(long)]
+        forge: Option<String>,
+        /// Which git remote names the repository to watch.
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        /// How often to look for work, and to re-read a head mid-battery.
+        #[arg(long, default_value = "60s")]
+        poll: String,
+        /// One pass, then stop.
+        #[arg(long)]
+        once: bool,
+        /// Say what would happen; change nothing on the forge.
+        #[arg(long)]
+        dry_run: bool,
+        /// Take the environment and cache policy from this profile.
+        #[arg(long)]
+        profile: Option<String>,
     },
 
     /// Show live sessions.
@@ -204,6 +230,28 @@ fn main() -> ExitCode {
             session,
             manifest,
         } => commands::snapshot(name, session, manifest),
+        Command::Auto {
+            path,
+            forge,
+            remote,
+            poll,
+            once,
+            dry_run,
+            profile,
+        } => match reaper_core::duration::parse(&poll) {
+            Ok(poll) => auto::auto(
+                path,
+                auto::Options {
+                    forge,
+                    remote,
+                    poll,
+                    once,
+                    dry_run,
+                    profile,
+                },
+            ),
+            Err(e) => Err(format!("--poll: {e}").into()),
+        },
         Command::List => commands::list(),
         Command::Renew {
             session,

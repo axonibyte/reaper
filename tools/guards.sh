@@ -11,7 +11,7 @@
 # testing methodology's Tier 3: parse the project's own source and assert
 # structural claims about it. Milliseconds, no build, no network.
 #
-# Usage: guards.sh [tenant|guest|provider]   (no argument runs all three)
+# Usage: guards.sh [tenant|guest|provider|forge]   (no argument runs all four)
 #
 # Exit 0 if every seam holds, 1 otherwise.
 set -eu
@@ -21,24 +21,39 @@ cd "${root}"
 
 failures=0
 
-# scan <label> <allow-regex> <forbid-regex> <why>
+# scan <label> <allow-regex> <forbid-regex> <why> [blind-sed]
 #
 # Reports every file outside the allowed paths that matches the forbidden
 # pattern. Untracked files are scanned too: a new source file is untracked for
 # exactly the window in which this gate is its only reviewer. Build output
 # stays out via .gitignore (--exclude-standard).
+#
+# blind-sed, when given, is applied to each file before the pattern is tried.
+# It exists for the forge seam, where one adapter's name is also a substring of
+# the CI directory's name, so that the guard can be blinded to that one exact
+# spelling rather than to whole directories. It is line-preserving, so the
+# reported line numbers are still the file's own. Note what it cannot do: it is
+# a plain substitution, so blinding it to a spelling blinds it everywhere that
+# spelling appears, including inside a genuine leak that happened to contain
+# it.
 scan() {
     label=$1
     allow=$2
     forbid=$3
     why=$4
+    blind=${5:-}
 
     hits=''
     for f in $(git ls-files --cached --others --exclude-standard | grep -Ev "${allow}"); do
         # Binary files and deleted-but-tracked paths are skipped rather than
         # reported as errors; neither is source anyone can leak through.
         [ -f "${f}" ] || continue
-        if match=$(grep -nIiE "${forbid}" "${f}" 2>/dev/null); then
+        if [ -n "${blind}" ]; then
+            text=$(sed "${blind}" "${f}" 2>/dev/null || true)
+        else
+            text=$(cat "${f}" 2>/dev/null || true)
+        fi
+        if match=$(printf '%s\n' "${text}" | grep -nIiE "${forbid}"); then
             hits="${hits}$(printf '%s\n' "${match}" | sed "s|^|  ${f}:|")
 "
         fi
@@ -135,6 +150,64 @@ registry entry, never a code change -- and a single hardcoded device
 path or init command is enough to make that false."
 }
 
+guard_forge() {
+    # Forge specifics belong to an adapter and to the registry that selects
+    # one. Everywhere else they are an assumption that only one forge exists.
+    #
+    # The policed names are read out of the registry's own list rather than
+    # written here, which is why this guard needs no exemption for itself: it
+    # does not contain the words it polices. Add an adapter to AVAILABLE and it
+    # is policed from then on with no edit to this file.
+    #
+    # Note what this does NOT police: the name of a CI vendor or a code host
+    # that this build has no adapter for. Where the repository happens to live,
+    # and which machines compile it, are different questions from which forges
+    # `auto` can drive -- and conflating them would have meant exempting
+    # .gitignore, ci/ and the manifest schema wholesale, which is a wider hole
+    # than the one it closed.
+    #
+    # .forgejo/ is exempt as it is at the other three seams: it is vendor CI
+    # configuration whose directory name is the vendor's choice, and no reaper
+    # code reads it.
+    #
+    # And one spelling is BLINDED rather than exempted, because that directory
+    # name happens to contain an adapter's name: every mention of the CI
+    # directory elsewhere in the tree -- a build script saying where the
+    # workflow went, an invariant anchored on it -- would otherwise read as a
+    # leak. Exempting the files that mention it (ci/, tools/, .gitignore, the
+    # manifest schema) would have been the easy fix and a far wider hole; this
+    # blinds the scan to those literals and to nothing else -- both of them,
+    # since the tree's history names the previous host's directory too.
+    #
+    # tools/ is exempt, and this is the one exemption here worth arguing about.
+    # These are the gate scripts: they hold no reaper code, link against
+    # nothing, and cannot carry a forge dependency in any form -- and the only
+    # forge-shaped words in them name the CI SYSTEM, which happens to be
+    # spelled the same as an adapter. The cost is that a gate script could
+    # reach for a forge's API and pass this seam, which has to be caught in
+    # review. The alternative was a gate script that may not say which CI
+    # product it is accommodating, which is worse.
+    names=$(sed -n 's/^pub const AVAILABLE: &\[&str\] = &\[\(.*\)\];.*/\1/p' \
+            forges/registry/src/lib.rs | tr -d '"' | tr -d ' ' | tr ',' '|' | sed 's/|$//')
+    if [ -z "${names}" ]; then
+        echo "FAIL  forge seam"
+        echo "      no forge names found in the registry; this guard is not"
+        echo "      checking anything, which is worse than it failing."
+        failures=$((failures + 1))
+        return
+    fi
+
+    scan "forge seam" \
+        '^(docs/|README\.md$|Cargo\.toml$|Cargo\.lock$|forges/|\.forgejo/|tools/)' \
+        "\\b(${names})\\b" \
+        "A forge name appeared outside the adapters. Which forge hosts a
+repository is configuration, and which adapter drives it is the
+registry's one decision -- so the name belongs in forges/ and in a
+site configuration file, and nowhere else. A test that needs a forge
+takes the stand-in from the registry, which names none." \
+        's|\.forgejo|CI-DIRECTORY|g; s|\.github|CI-DIRECTORY|g'
+}
+
 guard_provider() {
     # Hypervisor vocabulary belongs to a provider and its sweeper.
     #
@@ -164,8 +237,9 @@ case "${1:-all}" in
     tenant)   guard_tenant ;;
     guest)    guard_guest ;;
     provider) guard_provider ;;
-    all)      guard_tenant; guard_guest; guard_provider ;;
-    *)        echo "usage: $0 [tenant|guest|provider]" >&2; exit 2 ;;
+    forge)    guard_forge ;;
+    all)      guard_tenant; guard_guest; guard_provider; guard_forge ;;
+    *)        echo "usage: $0 [tenant|guest|provider|forge]" >&2; exit 2 ;;
 esac
 
 [ "${failures}" -eq 0 ]

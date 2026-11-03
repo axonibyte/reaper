@@ -175,6 +175,47 @@ requires -- never to an account's full authority. If your hypervisor supports
 privilege-separated tokens that inherit nothing from the account that created
 them, use them.
 
+## Forge credentials
+
+Only `reaper auto` reads these, and only the adapter it selects reads its own
+table. The core carries them through uninterpreted, exactly as it does a
+provider's.
+
+```toml
+[forges.github]
+# Optional. The adapter drives the gh CLI, which already holds the credential,
+# refreshes it and honours enterprise hosts -- so reaper keeps no GitHub secret
+# of its own. Set this only if your gh is wrapped.
+command = "gh"
+
+[forges.forgejo]
+# Required unless the git remote already says it: there is no first-party
+# command-line client to delegate to, so this adapter talks to the API and
+# therefore holds a credential.
+url  = "https://forge.example.com"   # if the API is not on the remote's host
+repo = "owner/name"                  # if the remote does not say, e.g. a path
+token = "..."
+# or:
+# user = "someone"
+# password_command = "pass show forge/someone"
+```
+
+Three notes, in order of how much they will cost you.
+
+**Prefer `password_command` to `password`.** The command's first line of output
+is the secret. A literal in a configuration file is readable by anything that
+can read the file, backed up with it, and quoted into bug reports with it.
+
+**A table is absent, not empty, when unconfigured.** One adapter needs a
+credential and the other does not, so "no table" is a legitimate state and only
+the adapter can say whether it is a problem. The GitHub adapter will work with
+no table at all; the other will tell you which key it wanted.
+
+**These are per-site, and the repository is per-clone.** Which forge hosts a
+repository comes from that clone's git remote, not from here -- so one
+configuration file serves every project on the workstation, and `auto` in two
+different clones can reach two different forges.
+
 ## Transport security
 
 `tls` takes three values, and there is no default -- the choice is too
