@@ -128,6 +128,8 @@ pub struct Config {
     pub guests: BTreeMap<String, GuestEntry>,
     /// The selected provider's own table, uninterpreted.
     provider_table: toml::Value,
+    /// One table per forge adapter, uninterpreted. Keyed by adapter name.
+    forges: BTreeMap<String, toml::Value>,
 }
 
 impl Config {
@@ -147,6 +149,16 @@ impl Config {
 
     pub fn guest_names(&self) -> Vec<&str> {
         self.guests.keys().map(String::as_str).collect()
+    }
+
+    /// A forge adapter's configuration, for the adapter to read. The core
+    /// never looks inside, exactly as with a provider.
+    ///
+    /// Absent rather than empty when unconfigured: one adapter needs a
+    /// credential and the other does not, so "no table" is a legitimate
+    /// state and only the adapter can say whether it is a problem.
+    pub fn forge_table(&self, name: &str) -> Option<&toml::Value> {
+        self.forges.get(name)
     }
 }
 
@@ -176,6 +188,11 @@ struct RawConfig {
     session: RawSession,
     #[serde(default)]
     guests: BTreeMap<String, GuestEntry>,
+    /// One table per forge adapter, none of which the core reads. Named
+    /// explicitly rather than left to `extra` so that a forge table is never
+    /// mistaken for a provider's.
+    #[serde(default)]
+    forges: BTreeMap<String, toml::Value>,
     /// Everything else: one table per provider, none of which the core reads.
     #[serde(flatten)]
     extra: BTreeMap<String, toml::Value>,
@@ -298,6 +315,7 @@ pub fn parse(text: &str, path: &Path) -> Result<Config, ConfigError> {
     Ok(Config {
         path: path.to_path_buf(),
         provider: raw.provider,
+        forges: raw.forges,
         session: SessionConfig {
             default_ttl,
             heartbeat_interval,

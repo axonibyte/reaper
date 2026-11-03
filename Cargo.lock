@@ -802,6 +802,7 @@ dependencies = [
  "clap",
  "libc",
  "reaper-core",
+ "reaper-forges",
  "reaper-manifest",
  "reaper-providers",
 ]
@@ -812,6 +813,37 @@ version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "reaper-forge-forgejo"
+version = "0.3.1"
+dependencies = [
+ "reaper-core",
+ "serde",
+ "serde_json",
+ "toml 0.9.12+spec-1.1.0",
+ "ureq",
+]
+
+[[package]]
+name = "reaper-forge-github"
+version = "0.3.1"
+dependencies = [
+ "reaper-core",
+ "serde",
+ "serde_json",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "reaper-forges"
+version = "0.3.1"
+dependencies = [
+ "reaper-core",
+ "reaper-forge-forgejo",
+ "reaper-forge-github",
  "toml 0.9.12+spec-1.1.0",
 ]
 
