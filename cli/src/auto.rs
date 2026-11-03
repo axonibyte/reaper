@@ -68,9 +68,9 @@ pub fn auto(path: Option<PathBuf>, opts: Options) -> Result<()> {
         Some(p) => p,
         None => std::env::current_dir()?,
     };
-    let dir = dir.canonicalize().map_err(|e| -> Error {
-        format!("{}: {e}", dir.display()).into()
-    })?;
+    let dir = dir
+        .canonicalize()
+        .map_err(|e| -> Error { format!("{}: {e}", dir.display()).into() })?;
     if !dir.join(".git").exists() {
         return Err(format!("{} is not a git clone", dir.display()).into());
     }
@@ -170,14 +170,21 @@ fn pass(dir: &Path, exe: &Path, forge: &dyn Forge, opts: &Options) -> Result<Pas
         .into());
     }
 
-    git(dir, &["fetch", "--quiet", "--force", &opts.remote, &req.fetch_ref])?;
+    git(
+        dir,
+        &["fetch", "--quiet", "--force", &opts.remote, &req.fetch_ref],
+    )?;
     git(dir, &["checkout", "--quiet", "--detach", "FETCH_HEAD"])?;
     let at = git(dir, &["rev-parse", "HEAD"])?.trim().to_string();
     if at != req.head {
         // The forge said one thing and the ref gave another: a commit landed
         // between the listing and the fetch. Go round rather than test a
         // commit we are about to mis-attribute.
-        say!("auto: head moved while fetching ({} -> {})", short(&req.head), short(&at));
+        say!(
+            "auto: head moved while fetching ({} -> {})",
+            short(&req.head),
+            short(&at)
+        );
         return Ok(Pass::Superseded);
     }
     say!("auto: checked out {} detached", short(&at));
@@ -215,7 +222,10 @@ fn pass(dir: &Path, exe: &Path, forge: &dyn Forge, opts: &Options) -> Result<Pas
                     // Say so on the request, not just here. Without a comment
                     // the loop would pick this request up again next pass and
                     // keep failing the same way for as long as it is open.
-                    say!("auto: request {} is green but would not merge: {e}", req.number);
+                    say!(
+                        "auto: request {} is green but would not merge: {e}",
+                        req.number
+                    );
                     let body = refused_comment(&req, &e.to_string(), &log);
                     forge.comment(req.number, &body)?;
                     Ok(Pass::Acted)
@@ -272,8 +282,13 @@ fn ensure_session(exe: &Path, dir: &Path, opts: &Options) -> Result<()> {
 }
 
 enum Battery {
-    Green { log: Vec<String> },
-    Red { log: Vec<String>, status: ExitStatus },
+    Green {
+        log: Vec<String>,
+    },
+    Red {
+        log: Vec<String>,
+        status: ExitStatus,
+    },
     Superseded,
 }
 
@@ -503,7 +518,7 @@ mod tests {
         // answered, and will retest the same commit for as long as it is open.
         let body = red_comment(&req(), fake_status(), &lines(3));
         assert!(
-            reaper_core::forge::already_judged(&req().head, &[body.clone()]),
+            reaper_core::forge::already_judged(&req().head, std::slice::from_ref(&body)),
             "{body}"
         );
     }
@@ -513,7 +528,10 @@ mod tests {
         // The green-but-unmergeable path is the one most easily left out, and
         // leaving it out is an infinite loop rather than a missing nicety.
         let body = refused_comment(&req(), "merge conflict", &lines(3));
-        assert!(reaper_core::forge::already_judged(&req().head, &[body.clone()]), "{body}");
+        assert!(
+            reaper_core::forge::already_judged(&req().head, std::slice::from_ref(&body)),
+            "{body}"
+        );
         assert!(body.contains("merge conflict"), "{body}");
     }
 
@@ -522,7 +540,10 @@ mod tests {
         let body = tail(&lines(500));
         assert!(body.contains("line 499"), "the tail must be the end");
         assert!(!body.contains("line 0\n"), "the head must be dropped");
-        assert!(body.contains("are omitted"), "and must say that it was: {body}");
+        assert!(
+            body.contains("are omitted"),
+            "and must say that it was: {body}"
+        );
     }
 
     #[test]

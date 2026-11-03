@@ -3668,12 +3668,7 @@ impl Harness {
         // is under test is the plumbing, not the change.
         self.git(&["commit", "--quiet", "--allow-empty", "-m", "request one"]);
         let head = self.git(&["rev-parse", "HEAD"]);
-        self.git(&[
-            "push",
-            "--quiet",
-            "origin",
-            &format!("HEAD:refs/pull/1/head"),
-        ]);
+        self.git(&["push", "--quiet", "origin", "HEAD:refs/pull/1/head"]);
         self.git(&["checkout", "--quiet", "main"]);
         self.git(&["reset", "--hard", "--quiet", "origin/main"]);
 
@@ -3724,7 +3719,11 @@ fn auto_tests_an_open_request_and_rebase_merges_it_when_green() {
     );
     assert!(out.status.success(), "auto failed:\n{text}");
 
-    assert_eq!(s.forge.merged(), vec![1], "the request should be landed:\n{text}");
+    assert_eq!(
+        s.forge.merged(),
+        vec![1],
+        "the request should be landed:\n{text}"
+    );
     assert!(
         s.forge.own_comments(1).is_empty(),
         "a green request that merged needs no comment: {:?}",
@@ -3756,7 +3755,10 @@ fn auto_comments_the_failures_when_the_battery_is_red_and_does_not_merge() {
     let said = s.forge.own_comments(1);
     assert_eq!(said.len(), 1, "expected one verdict comment, got {said:?}");
     let body = &said[0];
-    assert!(body.contains(&s.head), "the verdict must name the commit:\n{body}");
+    assert!(
+        body.contains(&s.head),
+        "the verdict must name the commit:\n{body}"
+    );
     assert!(
         reaper_core::forge::already_judged(&s.head, &said),
         "and must be recognisable as a verdict:\n{body}"
@@ -3766,7 +3768,10 @@ fn auto_comments_the_failures_when_the_battery_is_red_and_does_not_merge() {
         "and must carry the battery's output, not just a verdict line:\n{body}"
     );
     let text = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(text.contains("battery red"), "auto should say so too:\n{text}");
+    assert!(
+        text.contains("battery red"),
+        "auto should say so too:\n{text}"
+    );
     h.ok(&["down"]);
 }
 
@@ -3776,7 +3781,11 @@ fn auto_leaves_a_request_alone_once_it_has_judged_that_commit() {
     let s = h.set_up_auto();
     h.make_ssh_fail("exec --project");
     h.auto(&[]);
-    assert_eq!(s.forge.own_comments(1).len(), 1, "first pass should comment");
+    assert_eq!(
+        s.forge.own_comments(1).len(),
+        1,
+        "first pass should comment"
+    );
 
     // Second pass: same commit, verdict already given.
     let out = h.auto(&[]);

@@ -229,12 +229,7 @@ fn serve(mut stream: TcpStream, state: &Arc<Mutex<State>>) -> std::io::Result<()
     stream.flush()
 }
 
-fn route(
-    method: &str,
-    path: &str,
-    body: &str,
-    state: &Arc<Mutex<State>>,
-) -> (u16, String) {
+fn route(method: &str, path: &str, body: &str, state: &Arc<Mutex<State>>) -> (u16, String) {
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
     // api/v1/user
     if method == "GET" && segments == ["api", "v1", "user"] {
@@ -318,7 +313,10 @@ fn route(
             _ => {}
         }
     }
-    (404, format!(r#"{{"message":"no route for {method} {path}"}}"#))
+    (
+        404,
+        format!(r#"{{"message":"no route for {method} {path}"}}"#),
+    )
 }
 
 /// The `body` field of a posted comment, undoing the escaping above.

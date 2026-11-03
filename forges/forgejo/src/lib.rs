@@ -72,18 +72,15 @@ impl Forgejo {
         };
         let base = match over("url") {
             Some(u) => u.trim_end_matches('/').to_string(),
-            None => parts
-                .as_ref()
-                .map(|p| p.base())
-                .ok_or_else(|| ForgeError::Config(format!(
+            None => parts.as_ref().map(|p| p.base()).ok_or_else(|| {
+                ForgeError::Config(format!(
                     "cannot tell which host serves {url:?}; set url in [forges.forgejo]"
-                )))?,
+                ))
+            })?,
         };
         let (owner, name) = match over("repo") {
             Some(slug) => match slug.split_once('/') {
-                Some((o, n)) if !o.is_empty() && !n.is_empty() => {
-                    (o.to_string(), n.to_string())
-                }
+                Some((o, n)) if !o.is_empty() && !n.is_empty() => (o.to_string(), n.to_string()),
                 _ => {
                     return Err(ForgeError::Config(format!(
                         "[forges.forgejo] repo is {slug:?}; it should be owner/name"
@@ -93,9 +90,11 @@ impl Forgejo {
             None => parts
                 .as_ref()
                 .map(|p| (p.owner.clone(), p.name.clone()))
-                .ok_or_else(|| ForgeError::Config(format!(
-                    "cannot tell which repository {url:?} is; set repo in [forges.forgejo]"
-                )))?,
+                .ok_or_else(|| {
+                    ForgeError::Config(format!(
+                        "cannot tell which repository {url:?} is; set repo in [forges.forgejo]"
+                    ))
+                })?,
         };
         let t = table.ok_or_else(|| {
             ForgeError::Config(format!(
@@ -208,7 +207,7 @@ fn read_command(cmd: &str) -> Result<String, ForgeError> {
 /// sixteen lines is a supply-chain decision nobody revisits.
 fn base64(bytes: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b = [
             chunk[0],
@@ -351,9 +350,7 @@ mod override_tests {
 
     #[test]
     fn configuration_may_name_a_different_api_host_from_the_git_remote() {
-        let t = table(
-            "url = \"https://api.forge.example.com/\"\ntoken = \"t\"",
-        );
+        let t = table("url = \"https://api.forge.example.com/\"\ntoken = \"t\"");
         let f = Forgejo::from_remote("git@push.forge.example.com:o/n.git", Some(&t)).unwrap();
         assert_eq!(f.base, "https://api.forge.example.com");
         assert_eq!((f.owner.as_str(), f.name.as_str()), ("o", "n"));
@@ -363,9 +360,7 @@ mod override_tests {
     fn a_remote_with_no_host_in_it_works_when_configuration_supplies_both() {
         // A filesystem remote -- which is what a clone of a clone has, and
         // what the end-to-end suite uses.
-        let t = table(
-            "url = \"http://127.0.0.1:9\"\nrepo = \"o/n\"\ntoken = \"t\"",
-        );
+        let t = table("url = \"http://127.0.0.1:9\"\nrepo = \"o/n\"\ntoken = \"t\"");
         let f = Forgejo::from_remote("/srv/git/mirror.git", Some(&t)).unwrap();
         assert_eq!(f.base, "http://127.0.0.1:9");
         assert_eq!((f.owner.as_str(), f.name.as_str()), ("o", "n"));

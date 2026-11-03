@@ -113,7 +113,7 @@ impl RemoteParts {
 }
 
 fn prefix_len(lowered: &str, prefix: &str) -> Option<usize> {
-    lowered.starts_with(prefix).then(|| prefix.len())
+    lowered.starts_with(prefix).then_some(prefix.len())
 }
 
 /// Take a remote URL apart, or decline to guess.
@@ -221,7 +221,6 @@ pub fn already_judged(head: &str, own_comments: &[String]) -> bool {
 mod tests {
     use super::*;
 
-
     #[test]
     fn every_remote_shape_git_accepts_names_the_same_repository() {
         for url in [
@@ -258,11 +257,15 @@ mod tests {
     #[test]
     fn an_ssh_remote_is_addressed_over_http_not_ssh() {
         assert_eq!(
-            split_remote("ssh://git@forge.example.com/o/n.git").unwrap().base(),
+            split_remote("ssh://git@forge.example.com/o/n.git")
+                .unwrap()
+                .base(),
             "https://forge.example.com"
         );
         assert_eq!(
-            split_remote("git@forge.example.com:o/n.git").unwrap().base(),
+            split_remote("git@forge.example.com:o/n.git")
+                .unwrap()
+                .base(),
             "https://forge.example.com"
         );
     }
@@ -272,7 +275,9 @@ mod tests {
         // A stand-in on loopback is http, and silently promoting it to https
         // would make the whole end-to-end suite unreachable.
         assert_eq!(
-            split_remote("http://127.0.0.1:8080/o/n.git").unwrap().base(),
+            split_remote("http://127.0.0.1:8080/o/n.git")
+                .unwrap()
+                .base(),
             "http://127.0.0.1"
         );
     }
@@ -340,9 +345,10 @@ mod tests {
         // beginning with the prefix would claim to be a verdict for whatever
         // hex-ish word followed, and every request would look judged.
         assert_eq!(judged_head("reaper verdict for abc was unclear"), None);
-        assert!(!already_judged("abcdef0123456789", &[
-            "reaper verdict for abc was unclear".to_string()
-        ]));
+        assert!(!already_judged(
+            "abcdef0123456789",
+            &["reaper verdict for abc was unclear".to_string()]
+        ));
     }
 
     #[test]
@@ -354,6 +360,9 @@ mod tests {
 
     #[test]
     fn no_comments_at_all_means_not_judged() {
-        assert!(!already_judged("abcdef0123456789abcdef0123456789abcdef01", &[]));
+        assert!(!already_judged(
+            "abcdef0123456789abcdef0123456789abcdef01",
+            &[]
+        ));
     }
 }
