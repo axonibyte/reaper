@@ -170,24 +170,64 @@ fn pass(dir: &Path, exe: &Path, forge: &dyn Forge, opts: &Options) -> Result<Pas
         .into());
     }
 
-    git(
+    // The forge's merge commit, not the request's head. Both forges publish
+    // this ref only while the request actually merges, so a fetch that cannot
+    // find it is the first signal of a conflict -- before a machine is built,
+    // rather than after a battery and a refused merge.
+    if git(
         dir,
         &["fetch", "--quiet", "--force", &opts.remote, &req.fetch_ref],
-    )?;
+    )
+    .is_err()
+    {
+        // A missing ref and an unreachable forge look identical here, and the
+        // two want opposite handling: one is a verdict, the other is "try
+        // again shortly". A verdict is sticky, so the forge is asked before
+        // one is recorded.
+        return match forge.mergeable(req.number)? {
+            Some(false) => {
+                say!("auto: request {} does not merge; saying so", req.number);
+                if opts.dry_run {
+                    say!("auto: would comment that request {} conflicts", req.number);
+                    return Ok(Pass::Acted);
+                }
+                let body = conflict_comment(&req);
+                forge.comment(req.number, &body)?;
+                Ok(Pass::Acted)
+            }
+            // Still being worked out, or claimed mergeable while the ref is
+            // not there yet: both are "ask again", and neither is something to
+            // write on someone's request.
+            other => {
+                say!(
+                    "auto: no merge commit published for request {} yet (forge says mergeable={other:?}); leaving it",
+                    req.number
+                );
+                Ok(Pass::Idle)
+            }
+        };
+    }
     git(dir, &["checkout", "--quiet", "--detach", "FETCH_HEAD"])?;
-    let at = git(dir, &["rev-parse", "HEAD"])?.trim().to_string();
-    if at != req.head {
-        // The forge said one thing and the ref gave another: a commit landed
-        // between the listing and the fetch. Go round rather than test a
-        // commit we are about to mis-attribute.
+    let tested = git(dir, &["rev-parse", "HEAD"])?.trim().to_string();
+
+    // The head may have moved between the listing and the fetch, in which case
+    // the merge commit just fetched is of a commit we are not judging. Ask,
+    // rather than comparing against the checked-out tree -- that is the merge,
+    // and it never equals the head.
+    let now = forge.head_of(req.number)?;
+    if now != req.head {
         say!(
             "auto: head moved while fetching ({} -> {})",
             short(&req.head),
-            short(&at)
+            short(&now)
         );
         return Ok(Pass::Superseded);
     }
-    say!("auto: checked out {} detached", short(&at));
+    say!(
+        "auto: testing merge {} of head {}",
+        short(&tested),
+        short(&req.head)
+    );
 
     ensure_session(exe, dir, opts)?;
 
@@ -241,7 +281,7 @@ fn pass(dir: &Path, exe: &Path, forge: &dyn Forge, opts: &Options) -> Result<Pas
                 );
                 return Ok(Pass::Acted);
             }
-            let body = red_comment(&req, status, &log);
+            let body = red_comment(&req, status, &tested, &log);
             forge.comment(req.number, &body)?;
             say!("auto: request {} is red; said so", req.number);
             Ok(Pass::Acted)
@@ -444,11 +484,25 @@ fn tail(log: &[String]) -> String {
     body
 }
 
-fn red_comment(req: &Request, status: ExitStatus, log: &[String]) -> String {
+fn red_comment(req: &Request, status: ExitStatus, tested: &str, log: &[String]) -> String {
     format!(
-        "reaper ran its battery against this request and it failed ({}).\n\n{}\n{VERDICT_PREFIX}{}\n",
+        "reaper ran its battery against this request merged into its base \
+         (`{}`) and it failed ({}).\n\n{}\n{VERDICT_PREFIX}{}\n",
+        short(tested),
         describe(status),
         tail(log),
+        req.head
+    )
+}
+
+/// Said when the forge publishes no merge commit and admits the request does
+/// not merge. No battery has run, and the comment must not pretend one did.
+fn conflict_comment(req: &Request) -> String {
+    format!(
+        "reaper did not run a battery against this request: the forge publishes \
+         no merge commit for it, and reports that it does not merge. Rebase or \
+         merge the base branch in, and reaper will pick it up again.\n\n\
+         {VERDICT_PREFIX}{}\n",
         req.head
     )
 }
@@ -516,7 +570,7 @@ mod tests {
     fn a_red_comment_carries_the_marker_for_the_commit_it_judged() {
         // Without the marker the loop cannot tell this request has been
         // answered, and will retest the same commit for as long as it is open.
-        let body = red_comment(&req(), fake_status(), &lines(3));
+        let body = red_comment(&req(), fake_status(), "aaaaaaaaaaaa", &lines(3));
         assert!(
             reaper_core::forge::already_judged(&req().head, std::slice::from_ref(&body)),
             "{body}"
@@ -533,6 +587,32 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("merge conflict"), "{body}");
+    }
+
+    #[test]
+    fn a_conflict_comment_is_a_verdict_and_does_not_claim_a_battery_ran() {
+        // Both halves matter. Without the marker the loop retries a conflict
+        // every poll for as long as the request is open; and a comment that
+        // read like a test failure would send someone looking for a log that
+        // was never produced.
+        let body = conflict_comment(&req());
+        assert!(
+            reaper_core::forge::already_judged(&req().head, std::slice::from_ref(&body)),
+            "{body}"
+        );
+        assert!(body.contains("did not run a battery"), "{body}");
+        assert!(!body.contains("```"), "there is no log to quote: {body}");
+    }
+
+    #[test]
+    fn a_red_comment_says_it_tested_the_merge_not_the_branch() {
+        // The whole point of the change: a reader has to be able to tell which
+        // tree the verdict is about, or "it passes on my branch" and "reaper
+        // says it fails" look like a contradiction rather than the two
+        // different questions they are.
+        let body = red_comment(&req(), fake_status(), "0123456789ab", &lines(2));
+        assert!(body.contains("merged into its base"), "{body}");
+        assert!(body.contains("0123456789ab"), "{body}");
     }
 
     #[test]
@@ -557,7 +637,7 @@ mod tests {
     fn a_comment_stays_under_the_size_a_forge_will_accept() {
         // One enormous line, which the line cap alone does not bound.
         let huge = vec!["x".repeat(200_000)];
-        let body = red_comment(&req(), fake_status(), &huge);
+        let body = red_comment(&req(), fake_status(), "aaaaaaaaaaaa", &huge);
         assert!(body.len() <= COMMENT_BYTES + 2048, "{} bytes", body.len());
         assert!(body.contains("truncated"), "and must say so");
     }

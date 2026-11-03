@@ -37,6 +37,10 @@ struct Pull {
     number: u64,
     title: String,
     head: Head,
+    /// Absent while the forge is still working it out, which is a state the
+    /// caller has to be able to see -- hence Option rather than a default.
+    #[serde(default)]
+    mergeable: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -124,7 +128,15 @@ impl Forgejo {
             format!("Basic {}", base64(format!("{user}:{password}").as_bytes()))
         };
         Ok(Forgejo {
-            agent: Agent::new_with_defaults(),
+            // Read the body of a refusal rather than throwing it away. The API
+            // puts the reason in there, and a verdict comment that says "http
+            // status: 409" to the person whose request it is has told them
+            // nothing -- which is precisely what it did until a test asked for
+            // the forge's own words back.
+            agent: Agent::config_builder()
+                .http_status_as_error(false)
+                .build()
+                .into(),
             base,
             owner,
             name,
@@ -137,29 +149,56 @@ impl Forgejo {
     }
 
     fn get(&self, path: &str) -> Result<String, ForgeError> {
-        let mut resp = self
+        let resp = self
             .agent
             .get(self.url(path))
             .header("Authorization", &self.auth)
             .header("Accept", "application/json")
-            .call()
-            .map_err(|e| ForgeError::Transport(format!("{path}: {e}")))?;
-        resp.body_mut()
-            .read_to_string()
-            .map_err(|e| ForgeError::Transport(format!("{path}: cannot read the reply: {e}")))
+            .call();
+        self.read(resp, path)
     }
 
     fn post(&self, path: &str, body: Value) -> Result<(), ForgeError> {
-        self.agent
+        let resp = self
+            .agent
             .post(self.url(path))
             .header("Authorization", &self.auth)
             .header("Accept", "application/json")
-            .send_json(&body)
-            .map_err(|e| ForgeError::Refused {
-                what: path.to_string(),
-                why: e.to_string(),
-            })?;
-        Ok(())
+            .send_json(&body);
+        self.read(resp, path).map(|_| ())
+    }
+
+    /// The reply body, or an error carrying whatever the forge said about why.
+    fn read(
+        &self,
+        resp: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+        path: &str,
+    ) -> Result<String, ForgeError> {
+        let mut resp = resp.map_err(|e| ForgeError::Transport(format!("{path}: {e}")))?;
+        let status = resp.status().as_u16();
+        let body = resp
+            .body_mut()
+            .read_to_string()
+            .unwrap_or_else(|e| format!("<unreadable body: {e}>"));
+        if (200..300).contains(&status) {
+            return Ok(body);
+        }
+        // The message field if there is one, the whole body if not. A forge
+        // speaks JSON on the way out as well as in, and quoting the envelope
+        // at a human reads worse than quoting the sentence inside it.
+        let why = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| {
+                v.get("message")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string)
+            })
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| body.trim().to_string());
+        Err(ForgeError::Refused {
+            what: format!("{path} ({status})"),
+            why,
+        })
     }
 
     fn repo(&self) -> String {
@@ -245,7 +284,8 @@ impl Forge for Forgejo {
                 number: p.number,
                 title: p.title,
                 head: p.head.sha,
-                fetch_ref: format!("refs/pull/{}/head", p.number),
+                // The merge commit, not the head: see Request::fetch_ref.
+                fetch_ref: format!("refs/pull/{}/merge", p.number),
             })
             .collect())
     }
@@ -268,6 +308,13 @@ impl Forge for Forgejo {
             .filter(|c| c.user.login == me)
             .map(|c| c.body)
             .collect())
+    }
+
+    fn mergeable(&self, number: u64) -> Result<Option<bool>, ForgeError> {
+        let text = self.get(&format!("{}/pulls/{number}", self.repo()))?;
+        let p: Pull = serde_json::from_str(&text)
+            .map_err(|e| ForgeError::Transport(format!("cannot read request {number}: {e}")))?;
+        Ok(p.mergeable)
     }
 
     fn comment(&self, number: u64, body: &str) -> Result<(), ForgeError> {

@@ -17,8 +17,9 @@ and then either land it or say on the request why not. Then do it again.
 2. **Skip anything already judged.** A verdict is a comment from reaper's own
    identity naming the commit it judged; if the current head is named, the
    request is left alone.
-3. **Fetch and check out** the request's head, detached. Refused outright if
-   the tree has uncommitted changes.
+3. **Fetch and check out the forge's merge commit**, detached -- not the
+   request's head. Refused outright if the tree has uncommitted changes. If no
+   merge commit is published, see conflicts below.
 4. **Make sure a session exists.** `up` is idempotent against a live one; if
    the record names a machine that is gone, the session is destroyed and
    remade.
@@ -30,6 +31,45 @@ and then either land it or say on the request why not. Then do it again.
 
 With `--once` it stops after one pass, which is the shape for a cron entry.
 Without it, it sleeps `--poll` between passes and runs until interrupted.
+
+## The merge, not the branch
+
+The question a battery is being asked is "would landing this break the base
+branch", and the request's own head cannot answer it. A request can pass
+perfectly on its branch and break the base the moment the two are combined,
+with no textual conflict anywhere for a forge to refuse -- and a verb that
+merges unattended on the strength of a green branch is a verb that lands
+breakage.
+
+So what gets fetched is `refs/pull/N/merge`, which both forges publish, and
+which *is* the merge result. The verdict is still recorded against the head
+commit, because that is what a reader of the request recognises and what
+"a new commit landed" means; the comment names both.
+
+That ref has a second use. Both forges publish it only while the request
+actually merges, so its absence is a conflict -- detectable before a machine is
+built, rather than after a battery and a refused merge.
+
+## Conflicts
+
+`auto` never resolves one. Three cases, told apart deliberately:
+
+**No merge commit, and the forge says the request does not merge.** A comment
+saying so, with no battery and no machine. It carries the verdict marker, so
+the request is left alone until a new commit lands.
+
+**No merge commit, and the forge has no opinion yet.** Nothing is written and
+nothing is tested. Both forges compute mergeability asynchronously and report
+nothing while they are still thinking, which is exactly the window just after a
+push -- and a verdict is sticky, so recording "this conflicts" because the
+forge was mid-thought would silence a perfectly good request until somebody
+noticed by hand. The same path covers a forge that cannot be reached.
+
+**A merge commit exists, the battery is green, and the forge still refuses the
+merge** -- a protected branch, a required review, a race. The forge's own
+reason goes on the request along with the battery log. Without that comment the
+request would be picked up and retested on every pass for as long as it stayed
+open.
 
 ## Why a comment is the record, and not a file
 
@@ -60,8 +100,10 @@ silence the loop.
 A commit arriving mid-pass is the normal case, not an edge case, and each
 window is handled differently.
 
-**Between the listing and the fetch.** The fetched commit will not be the one
-that was listed. Noticed by comparing them, and the pass starts again.
+**Between the listing and the fetch.** The merge commit just fetched is of a
+head we are not judging. Noticed by re-reading the head after the fetch -- by
+asking the forge, since the checked-out tree is the merge and never equals the
+head -- and the pass starts again.
 
 **During the battery.** The head is re-read every `--poll`; a change kills the
 battery. The session is then **destroyed rather than reused**: a sync cut off
@@ -126,6 +168,14 @@ not reaped, so the battery runs on and the session stays up. Check with
 **The post-battery re-read is a point check, not a lock.** It closes the window
 to about the time one API call takes, and the forges this drives do not offer a
 way to say "merge only if the head is still X" through the same call.
+
+**A base branch moving does not retrigger anything.** The verdict names the
+head commit, so if somebody else's merge changes what this request would merge
+*into*, the merge commit changes while the head does not -- and the request
+stays judged on a tree that no longer exists. A new commit on the request, or
+deleting reaper's comment, is what gets it retested. Keying the verdict on the
+merge commit instead would fix this and would cost a fetch per candidate
+request on every pass, which is a trade not yet worth making.
 
 **A forge that goes away mid-battery is tolerated, not handled.** The head
 re-read failing is reported and the battery continues, on the grounds that a

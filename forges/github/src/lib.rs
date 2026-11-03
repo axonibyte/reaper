@@ -34,6 +34,10 @@ struct Pull {
     number: u64,
     title: String,
     head: Head,
+    /// Absent while the forge is still working it out, which is a state the
+    /// caller has to be able to see -- hence Option rather than a default.
+    #[serde(default)]
+    mergeable: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -125,7 +129,8 @@ impl Forge for GitHub {
                 number: p.number,
                 title: p.title,
                 head: p.head.sha,
-                fetch_ref: format!("refs/pull/{}/head", p.number),
+                // The merge commit, not the head: see Request::fetch_ref.
+                fetch_ref: format!("refs/pull/{}/merge", p.number),
             })
             .collect())
     }
@@ -151,6 +156,13 @@ impl Forge for GitHub {
             .filter(|c| c.user.login == me)
             .map(|c| c.body)
             .collect())
+    }
+
+    fn mergeable(&self, number: u64) -> Result<Option<bool>, ForgeError> {
+        let text = self.api(&format!("repos/{}/pulls/{number}", self.slug))?;
+        let p: Pull = serde_json::from_str(&text)
+            .map_err(|e| ForgeError::Transport(format!("cannot read request {number}: {e}")))?;
+        Ok(p.mergeable)
     }
 
     fn comment(&self, number: u64, body: &str) -> Result<(), ForgeError> {

@@ -3611,8 +3611,13 @@ use reaper_forges::mock::{StandIn as ForgeStandIn, NAME as FORGE};
 /// review request, and a forge that knows about it.
 struct AutoSetup {
     forge: ForgeStandIn,
-    /// The commit at the tip of request 1.
+    /// The commit at the tip of request 1 -- what a verdict is recorded
+    /// against, and NOT what gets tested.
     head: String,
+    /// The forge's merge commit for request 1 -- what gets tested. A distinct
+    /// commit from `head` on purpose: if the two were the same, a test could
+    /// not tell which one the battery ran against, which is the whole claim.
+    merge: String,
     upstream: PathBuf,
 }
 
@@ -3669,6 +3674,20 @@ impl Harness {
         self.git(&["commit", "--quiet", "--allow-empty", "-m", "request one"]);
         let head = self.git(&["rev-parse", "HEAD"]);
         self.git(&["push", "--quiet", "origin", "HEAD:refs/pull/1/head"]);
+
+        // And the forge's merge commit, one further on, standing in for "this
+        // request combined with its base". A separate commit so a test can
+        // prove which of the two the battery was given.
+        self.git(&[
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "merge of request one",
+        ]);
+        let merge = self.git(&["rev-parse", "HEAD"]);
+        self.git(&["push", "--quiet", "origin", "HEAD:refs/pull/1/merge"]);
+
         self.git(&["checkout", "--quiet", "main"]);
         self.git(&["reset", "--hard", "--quiet", "origin/main"]);
 
@@ -3689,8 +3708,14 @@ impl Harness {
         AutoSetup {
             forge,
             head,
+            merge,
             upstream,
         }
+    }
+
+    /// Withdraw the merge commit, as a forge does when a request conflicts.
+    fn drop_merge_ref(&self) {
+        self.git(&["push", "--quiet", "origin", "--delete", "refs/pull/1/merge"]);
     }
 
     fn auto(&self, extra: &[&str]) -> Output {
@@ -3930,8 +3955,12 @@ fn a_commit_landing_after_the_battery_is_caught_before_the_merge() {
     // one before the merge.
     let h = Harness::new("auto-late");
     let s = h.set_up_auto();
+    // One read goes by untouched -- the one just after the fetch, which checks
+    // the head has not moved while the merge commit was being pulled. The
+    // staged commit therefore lands on the NEXT read, which is the one taken
+    // immediately before the merge, and that is the window under test.
     s.forge
-        .set_head_on_next_read(1, "ffffffffffffffffffffffffffffffffffffffff");
+        .set_head_after_reads(1, 1, "ffffffffffffffffffffffffffffffffffffffff");
 
     let out = h.run(&["auto", "--once", "--forge", FORGE, "--poll", "30s"]);
     let text = format!(
@@ -3953,5 +3982,151 @@ fn a_commit_landing_after_the_battery_is_caught_before_the_merge() {
         "and no verdict belongs on a commit we did not judge: {:?}",
         s.forge.own_comments(1)
     );
+    h.ok(&["down"]);
+}
+
+#[test]
+fn auto_tests_the_merge_commit_rather_than_the_request_branch() {
+    // The claim that matters most in this verb: a request can pass on its own
+    // branch and break the base the moment the two are combined, with no
+    // textual conflict for the forge to refuse. So the battery has to be given
+    // the merge, and this proves which tree it got.
+    let h = Harness::new("auto-merge-ref");
+    let s = h.set_up_auto();
+
+    let out = h.auto(&[]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+
+    assert_ne!(s.merge, s.head, "the fixture must distinguish the two");
+    assert!(
+        text.contains(&s.merge[..12]),
+        "should say it tested the merge commit {}:\n{text}",
+        &s.merge[..12]
+    );
+    // And the clone really is at the merge, not at the branch tip.
+    let at = String::from_utf8_lossy(
+        &Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&h.dir)
+            .output()
+            .expect("git")
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    assert_eq!(at, s.merge, "the battery ran against the wrong tree");
+    assert_eq!(s.forge.merged(), vec![1]);
+    h.ok(&["down"]);
+}
+
+#[test]
+fn a_request_that_does_not_merge_is_said_so_without_building_a_machine() {
+    // No merge commit published and the forge admits it does not merge. The
+    // machine is the expensive part, so the conflict has to be caught before
+    // one is built rather than after a battery and a refused merge.
+    let h = Harness::new("auto-conflict");
+    let s = h.set_up_auto();
+    h.drop_merge_ref();
+    s.forge.set_mergeable(1, Some(false));
+
+    let out = h.auto(&[]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "a conflict is a verdict, not an error:\n{text}"
+    );
+
+    let said = s.forge.own_comments(1);
+    assert_eq!(said.len(), 1, "expected one comment, got {said:?}");
+    assert!(
+        said[0].contains("did not run a battery"),
+        "and it must not read like a test failure:\n{}",
+        said[0]
+    );
+    assert!(
+        reaper_core::forge::already_judged(&s.head, &said),
+        "and it must be a verdict, or the loop retries every poll:\n{}",
+        said[0]
+    );
+    assert!(s.forge.merged().is_empty(), "nothing may be landed");
+    assert!(
+        h.machines().is_empty(),
+        "no machine should have been built for a request that cannot merge: {:?}",
+        h.machines()
+    );
+}
+
+#[test]
+fn a_merge_ref_that_is_merely_late_is_left_alone_rather_than_judged() {
+    // The distinction a transport failure and a conflict would otherwise
+    // collapse into. The forge has no opinion yet -- which is the ordinary
+    // state in the seconds after a push -- so writing "this conflicts" would
+    // silence a perfectly good request until somebody noticed by hand.
+    let h = Harness::new("auto-mergeable-unknown");
+    let s = h.set_up_auto();
+    h.drop_merge_ref();
+    s.forge.set_mergeable(1, None);
+
+    let out = h.auto(&[]);
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("no merge commit published"),
+        "auto should say why it did nothing:\n{text}"
+    );
+    assert!(
+        s.forge.own_comments(1).is_empty(),
+        "nothing may be written on a request the forge has not judged: {:?}",
+        s.forge.own_comments(1)
+    );
+    assert!(s.forge.merged().is_empty());
+    assert!(h.machines().is_empty(), "{:?}", h.machines());
+}
+
+#[test]
+fn a_green_request_the_forge_refuses_to_merge_is_commented_not_retried() {
+    // The path that was unreachable from the suite until now: the stand-in has
+    // had a refuse_merge hook since the verb was written and nothing used it,
+    // so "green but the forge says no" was only ever covered by a unit test on
+    // the comment body. Without the comment this request is picked up and
+    // re-tested on every single pass for as long as it stays open.
+    let h = Harness::new("auto-merge-refused");
+    let s = h.set_up_auto();
+    s.forge.refuse_merge(1, "base branch is protected");
+
+    let out = h.auto(&[]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("would not merge"),
+        "auto should say the forge refused:\n{text}"
+    );
+
+    let said = s.forge.own_comments(1);
+    assert_eq!(said.len(), 1, "expected one comment, got {said:?}");
+    assert!(
+        said[0].contains("base branch is protected"),
+        "the forge's own reason is the useful part:\n{}",
+        said[0]
+    );
+    assert!(
+        reaper_core::forge::already_judged(&s.head, &said),
+        "and it must be a verdict:\n{}",
+        said[0]
+    );
+    assert!(s.forge.merged().is_empty());
     h.ok(&["down"]);
 }

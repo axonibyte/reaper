@@ -19,8 +19,23 @@ pub struct Request {
     pub number: u64,
     pub title: String,
     /// The commit at the tip of the request's branch, in full.
+    ///
+    /// What a verdict is recorded against, and what is watched for change --
+    /// but NOT what gets tested. See `fetch_ref`.
     pub head: String,
-    /// A refspec the local clone can fetch to obtain `head`.
+    /// A refspec the local clone can fetch to obtain the tree to test.
+    ///
+    /// This is the forge's MERGE commit, not the request's head: the question
+    /// a battery is being asked is "would landing this break the base
+    /// branch", and the head alone cannot answer it. A request can pass
+    /// perfectly on its own branch and break the base the moment the two are
+    /// combined, with no textual conflict anywhere for the forge to refuse --
+    /// and a verb that merges unattended on the strength of that is a verb
+    /// that lands breakage.
+    ///
+    /// It has a second use. Both forges publish this ref only while the
+    /// request actually merges, so its absence is a conflict, detectable
+    /// before a machine is built rather than after a battery.
     ///
     /// Supplied by the adapter rather than assembled here: the convention is
     /// a forge's, not a fact about git.
@@ -72,6 +87,17 @@ pub trait Forge {
     /// `already_judged`. An adapter that parsed it would be a second place for
     /// the marker format to drift.
     fn own_comments(&self, number: u64) -> Result<Vec<String>, ForgeError>;
+
+    /// Whether the forge believes this request merges, if it has an opinion.
+    ///
+    /// `None` is a real answer and the important one: both forges compute this
+    /// asynchronously and report nothing while they are still thinking, which
+    /// is exactly the window just after a push. Used to tell a conflict apart
+    /// from a transport failure -- a distinction worth a method, because
+    /// recording "this conflicts" is sticky, and doing it to a request that
+    /// was merely unreachable for a moment would silence it until someone
+    /// noticed by hand.
+    fn mergeable(&self, number: u64) -> Result<Option<bool>, ForgeError>;
 
     fn comment(&self, number: u64, body: &str) -> Result<(), ForgeError>;
 

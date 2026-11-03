@@ -347,10 +347,12 @@ And one verb that drives the others rather than the session:
 |---|---|
 | `reaper auto [PATH]` | watch a forge; test each open review request, then land it or say why not |
 
-`auto` is the loop above with nobody standing over it: it fetches a request's
-head, runs the battery, and either rebase-merges the request or comments the
-failures on it. A commit landing mid-battery stops the battery and starts
-again. See [`docs/auto.md`](docs/auto.md) -- including what it will never do,
+`auto` is the loop above with nobody standing over it: it fetches the forge's
+merge commit for a request -- the request combined with its base, not the
+branch on its own -- runs the battery, and either rebase-merges the request or
+comments the failures on it. A commit landing mid-battery stops the battery and
+starts again; a request that does not merge is said so without building a
+machine. See [`docs/auto.md`](docs/auto.md) -- including what it will never do,
 and the three windows a new commit can arrive in.
 | `reaper list` | what is up, how long it has left, whether its heartbeat is alive |
 | `reaper renew [--ttl 4h]` | more time |

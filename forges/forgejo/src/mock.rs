@@ -21,6 +21,8 @@ pub const LOGIN: &str = "reaper-stand-in";
 struct Request {
     title: String,
     head: String,
+    /// What the forge says about merging, including "still thinking".
+    mergeable: Option<bool>,
 }
 
 #[derive(Default)]
@@ -31,12 +33,15 @@ struct State {
     merged: Vec<u64>,
     /// Requests the forge will refuse to merge, and why.
     refuse_merge: BTreeMap<u64, String>,
-    /// A head change applied just before the next single-request read answers.
+    /// A head change applied once a given number of single-request reads have
+    /// gone by: (reads still to let through, the new head).
     ///
     /// Deterministic where a timer is not: it lets a test put a new commit
     /// exactly between two steps of the loop instead of hoping a sleep lands
-    /// in the right window.
-    pending_head: BTreeMap<u64, String>,
+    /// in the right window. The count is there because the loop reads a head
+    /// more than once per pass, and "the next read" stopped being the
+    /// interesting one as soon as a read was added earlier in the pass.
+    pending_head: BTreeMap<u64, (usize, String)>,
 }
 
 pub struct StandIn {
@@ -87,6 +92,7 @@ impl StandIn {
             Request {
                 title: title.to_string(),
                 head: head.to_string(),
+                mergeable: Some(true),
             },
         );
     }
@@ -98,13 +104,23 @@ impl StandIn {
         }
     }
 
-    /// Stage a new commit to appear on the next read of this request alone.
-    pub fn set_head_on_next_read(&self, number: u64, head: &str) {
+    /// What this request reports about merging. `None` is the forge still
+    /// working it out, which a caller has to be able to tell from a refusal.
+    pub fn set_mergeable(&self, number: u64, state: Option<bool>) {
+        if let Some(r) = self.state.lock().unwrap().requests.get_mut(&number) {
+            r.mergeable = state;
+        }
+    }
+
+    /// Stage a new commit to appear after `skip` further single-request reads.
+    ///
+    /// `skip = 0` is the very next read.
+    pub fn set_head_after_reads(&self, number: u64, skip: usize, head: &str) {
         self.state
             .lock()
             .unwrap()
             .pending_head
-            .insert(number, head.to_string());
+            .insert(number, (skip, head.to_string()));
     }
 
     pub fn close_request(&self, number: u64) {
@@ -168,8 +184,13 @@ fn json_escape(s: &str) -> String {
 }
 
 fn request_json(number: u64, r: &Request) -> String {
+    let mergeable = match r.mergeable {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "null",
+    };
     format!(
-        r#"{{"number":{number},"title":"{}","head":{{"sha":"{}"}}}}"#,
+        r#"{{"number":{number},"title":"{}","head":{{"sha":"{}"}},"mergeable":{mergeable}}}"#,
         json_escape(&r.title),
         json_escape(&r.head)
     )
@@ -251,10 +272,16 @@ fn route(method: &str, path: &str, body: &str, state: &Arc<Mutex<State>>) -> (u1
             }
             ("GET", ["pulls", n]) => {
                 let n: u64 = n.parse().unwrap_or(0);
-                if let Some(next) = st.pending_head.remove(&n) {
-                    if let Some(r) = st.requests.get_mut(&n) {
-                        r.head = next;
+                match st.pending_head.remove(&n) {
+                    Some((0, next)) => {
+                        if let Some(r) = st.requests.get_mut(&n) {
+                            r.head = next;
+                        }
                     }
+                    Some((skip, next)) => {
+                        st.pending_head.insert(n, (skip - 1, next));
+                    }
+                    None => {}
                 }
                 return match st.requests.get(&n) {
                     Some(r) => (200, request_json(n, r)),
